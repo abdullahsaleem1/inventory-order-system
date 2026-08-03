@@ -6,7 +6,6 @@ auth, event-driven order processing, CQRS, a from-scratch Redis rate limiter,
 distributed tracing, and chaos engineering tests — containerized with Docker Compose.
 
 ## Tech Stack
-
 - **Language/Framework:** Python 3.12, FastAPI
 - **Database:** PostgreSQL (async, via SQLAlchemy 2.0 + asyncpg)
 - **Migrations:** Alembic
@@ -16,7 +15,6 @@ distributed tracing, and chaos engineering tests — containerized with Docker C
 ## Architecture
 
 ### Domain-Driven Design — Bounded Contexts
-
 The system is split into two independent bounded contexts, each with its own
 domain model, database tables, and layered stack. They do **not** import each
 other's domain objects directly — cross-context communication will go through
@@ -42,12 +40,13 @@ migrations/ # Alembic migrations (async, targets app's DATABASE_URL)
 scripts/seed_data.py # Idempotent seed script — realistic products + role-based users
 postman_collection.json # Postman/Insomnia-importable API collection
 
-### Layered Request Flow
 
+### Layered Request Flow
 Every request follows the same strict path — no layer is skipped:
 
 Route → Controller → Service → Repository → Database
 (HTTP <-> domain) (business rules) (domain <-> ORM)
+
 
 - **Routes**: thin FastAPI endpoint definitions, dependency-injection wiring only.
 - **Controllers**: translate request/response schemas, map domain exceptions to HTTP errors.
@@ -58,7 +57,6 @@ Route → Controller → Service → Repository → Database
 ## Getting Started
 
 ### Local (without Docker)
-
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -75,7 +73,6 @@ uvicorn src.main:app --reload
 ```
 
 ### With Docker Compose
-
 ```bash
 cp .env.example .env
 docker compose up --build
@@ -89,31 +86,26 @@ docker compose exec api python -m scripts.seed_data
 - Health check: `http://localhost:8000/health` (liveness) / `http://localhost:8000/ready` (readiness, checks DB)
 - **pgAdmin** (Postgres management UI): `http://localhost:5050` — log in with the credentials in `.env` (defaults: `admin@example.com` / `admin`), then register a new server with host=`db`, port=`5432`, user=`postgres`, password=`postgres`.
 
-### Postman / Insomnia
-
-Import [`postman_collection.json`](./postman_collection.json) — includes the health/readiness endpoints plus every Inventory and Orders endpoint. Grows incrementally each week.
-
-### Running Tests
-
-```bash
-pip install -r requirements.txt
-pytest
-```
-
 ### Database Migrations
-
 Migrations live in `migrations/versions/`, managed by Alembic and targeting the app's own `DATABASE_URL` from `.env`.
-
 ```bash
 alembic upgrade head                              # apply all migrations
 alembic revision --autogenerate -m "add X table"  # generate a new migration after changing ORM models
 alembic downgrade -1                               # roll back one migration
 ```
 
+### Postman / Insomnia
+Import [`postman_collection.json`](./postman_collection.json) — includes the health/readiness endpoints plus every Inventory and Orders endpoint. Grows incrementally each week.
+
+### Running Tests
+```bash
+pip install -r requirements.txt
+pytest
+```
+
 ## Weekly Progress Log
 
 ### Week 1 — Project Setup & DDD Skeleton
-
 - Set up FastAPI project with strict layered architecture (Routes → Controllers → Services → Repositories)
 - Implemented two bounded contexts: **Inventory** (Product entity with stock rules) and **Orders** (Order entity with status transitions)
 - Async SQLAlchemy 2.0 setup with shared `Base`/session, separate tables per context
@@ -124,7 +116,6 @@ alembic downgrade -1                               # roll back one migration
 - **How to run:** see "Getting Started" above
 
 ### Week 2 — Layered Architecture & Seed Data
-
 **Admin feedback from Week 1 addressed:** added **pgAdmin** to `docker-compose.yml` as a Postgres management UI (`http://localhost:5050`).
 
 - **Structured JSON logging**: replaced all ad-hoc logging with a custom `JSONFormatter` (`src/core/logging_config.py`) — every log line is a single JSON object (timestamp, level, logger, message, plus structured `extra` fields), suitable for log aggregators. A `RequestLoggingMiddleware` logs every HTTP request (method, path, status, duration, request ID) and echoes the request ID back via `X-Request-ID` for correlation. No `print()`/console-log statements anywhere in the app.
@@ -140,7 +131,6 @@ alembic downgrade -1                               # roll back one migration
 <!-- Next week's entry goes here -->
 
 ## Roadmap (from project brief)
-
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
 - [x] DB migrations + seed data
