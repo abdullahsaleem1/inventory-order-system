@@ -6,6 +6,7 @@ sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
 alembic==1.13.2
 python-dotenv==1.0.1
+faker==29.0.0
 
 # --- test tooling ---
 pytest==8.3.3

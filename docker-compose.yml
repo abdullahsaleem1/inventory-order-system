@@ -23,6 +23,21 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Management UI for Postgres — added per Week 1 admin feedback.
+  # Visit http://localhost:5050, log in with the credentials below, then add
+  # a server manually: host=db, port=5432, user=postgres, password=postgres.
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
   # --- added in later weeks ---
   # redis:        # Redis token-bucket rate limiter
   # rabbitmq:     # event-driven order processing pipeline
@@ -30,3 +45,4 @@ services:
 
 volumes:
   pgdata:
+  pgadmin_data:
