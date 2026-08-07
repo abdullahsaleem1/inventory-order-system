@@ -1,11 +1,8 @@
 """
 Identity bounded context — domain layer.
 
-This context is intentionally minimal for Week 2: it exists only so we have
-a real User entity/table to seed realistic role-based test data with. Full
-auth behavior (password verification, token issuance, RBAC permission
-checks) is added in the OAuth2/JWT week — this file will grow then, not
-get replaced.
+User entity and roles. Password storage/verification is delegated to an
+injected PasswordHasher so this file stays free of library dependencies.
 """
 from dataclasses import dataclass
 from enum import Enum
@@ -27,3 +24,11 @@ class User(Entity):
     hashed_password: str
     role: Role = Role.CUSTOMER
     is_active: bool = True
+
+    def verify_password(self, plain_password: str, hasher) -> bool:
+        """Check a plaintext password against the stored hash."""
+        return hasher.verify_password(plain_password, self.hashed_password)
+
+    def set_password(self, plain_password: str, hasher) -> None:
+        """Replace the stored hash with a freshly salted hash of `plain_password`."""
+        self.hashed_password = hasher.hash_password(plain_password)

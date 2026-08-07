@@ -21,6 +21,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
         start = time.perf_counter()
 
         response: Response | None = None

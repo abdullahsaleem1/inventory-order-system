@@ -1,11 +1,12 @@
 {
   "info": {
     "name": "Inventory & Order Management System",
-    "description": "Started Week 2. Health/readiness endpoints are fully documented here; Inventory/Orders endpoints are included from Week 1 and will keep growing incrementally each week.",
+    "description": "Auth (register/login/OAuth2 token/me) added in Week 3. Health/readiness, Inventory and Orders endpoints included from earlier weeks. Set {{accessToken}} via a Login request script to call protected endpoints.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8000" }
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "accessToken", "value": "" }
   ],
   "item": [
     {
@@ -25,6 +26,74 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/ready", "host": ["{{baseUrl}}"], "path": ["ready"] },
             "description": "Returns 200 if the DB is reachable, 503 otherwise."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register - POST /auth/register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"alice@example.com\",\n  \"full_name\": \"Alice Smith\",\n  \"password\": \"S3curePass!\",\n  \"role\": \"CUSTOMER\"\n}"
+            },
+            "description": "Creates a user and returns the profile plus a short-lived Bearer access token. Password min 8 chars."
+          }
+        },
+        {
+          "name": "Login - POST /auth/login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"S3curePass!\"\n}" },
+            "description": "Exchanges email+password for a short-lived access token. Saves the token into the {{accessToken}} collection variable for protected calls.",
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "exec": [
+                    "const json = pm.response.json();",
+                    "if (pm.response.code === 200 && json.access_token) {",
+                    "  pm.collectionVariables.set('accessToken', json.access_token);",
+                    "}"
+                  ],
+                  "type": "text/javascript"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "OAuth2 Token - POST /oauth/token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "url": { "raw": "{{baseUrl}}/oauth/token", "host": ["{{baseUrl}}"], "path": ["oauth", "token"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "password" },
+                { "key": "username", "value": "alice@example.com" },
+                { "key": "password", "value": "S3curePass!" }
+              ]
+            },
+            "description": "OAuth2.0 Resource Owner Password Credentials grant. Same token response as /auth/login."
+          }
+        },
+        {
+          "name": "Me - GET /auth/me",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] },
+            "description": "Returns the currently authenticated user. Requires a valid Bearer access token (set by running Login first)."
           }
         }
       ]

@@ -4,16 +4,16 @@ Database seed script.
 Generates realistic test data for local/dev environments:
 - 60 products across a handful of categories, realistic SKUs/prices/stock
 - 12 users spread across every role (ADMIN, MANAGER, STAFF, CUSTOMER)
-- A password hashing placeholder is used here (a real hasher — passlib/bcrypt
-  — lands in the auth week). Do NOT reuse `hashed_password` values from this
-  script as real credentials anywhere.
+- Passwords are hashed with real bcrypt (per-user salt); every seeded user
+  logs in with the shared DEFAULT_SEED_PASSWORD (dev only, see below)
 
 Usage:
     python -m scripts.seed_data
     python -m scripts.seed_data --reset   # wipe seeded tables first
 
 Idempotent: re-running without --reset skips rows that already exist
-(matched by SKU / email) instead of creating duplicates.
+(matched by SKU / email) instead of creating duplicates. Re-run with
+--reset to re-seed rows that were created before real hashing existed.
 """
 import argparse
 import asyncio
@@ -24,6 +24,7 @@ from sqlalchemy import delete
 
 from src.contexts.identity.domain.user import Role, User
 from src.contexts.identity.infrastructure.models import UserModel
+from src.contexts.identity.infrastructure.password_hasher import BcryptPasswordHasher
 from src.contexts.identity.repositories.user_repository import UserRepository
 from src.contexts.inventory.domain.product import Product
 from src.contexts.inventory.infrastructure.models import ProductModel
@@ -45,8 +46,12 @@ ROLE_DISTRIBUTION: dict[Role, int] = {
     Role.CUSTOMER: 4,
 }
 
-# Placeholder only — replaced with real bcrypt hashing in the auth week.
-PLACEHOLDER_PASSWORD_HASH = "unset$replace-with-real-hash-in-auth-week"
+# Every seeded account shares this development-only password so you can log in
+# through the auth endpoints immediately. Change it if the seed data is ever
+# exposed outside a throwaway local/dev database.
+DEFAULT_SEED_PASSWORD = "Password123!"
+
+password_hasher = BcryptPasswordHasher()
 
 
 def _generate_sku(category: str, index: int) -> str:
@@ -91,10 +96,11 @@ async def seed_users(session) -> int:
             user = User(
                 email=email,
                 full_name=fake.name(),
-                hashed_password=PLACEHOLDER_PASSWORD_HASH,
+                hashed_password="",  # set via real bcrypt hasher below
                 role=role,
                 is_active=True,
             )
+            user.set_password(DEFAULT_SEED_PASSWORD, password_hasher)
             await repo.add(user)
             created += 1
 

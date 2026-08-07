@@ -1,21 +1,28 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pydantic-settings==2.5.2
-sqlalchemy[asyncio]==2.0.35
-asyncpg==0.29.0
-alembic==1.13.2
-python-dotenv==1.0.1
-faker==29.0.0
+# Pins bumped (Week 3) to versions that ship cp314 wheels so the stack
+# installs cleanly on Python 3.14 as well as 3.12.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+pydantic==2.13.4
+pydantic-settings==2.15.0
+sqlalchemy[asyncio]==2.0.51
+asyncpg==0.31.0
+alembic==1.19.0
+python-dotenv==1.2.2
+faker==40.36.0
+
+# --- auth (OAuth2/JWT week) ---
+bcrypt==5.0.0               # password hashing (salt embedded in hash)
+PyJWT==2.13.0               # JWT signing/verification (HS256)
+email-validator==2.3.0      # EmailStr schema validation
+python-multipart==0.0.32    # application/x-www-form-urlencoded (OAuth2 token endpoint)
 
 # --- test tooling ---
-pytest==8.3.3
-pytest-asyncio==0.24.0
-httpx==0.27.2
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+aiosqlite==0.22.1           # in-memory DB for auth integration tests
 
 # --- to be added in later weeks ---
-# python-jose[cryptography]   # JWT (auth week)
-# passlib[bcrypt]             # password hashing (auth week)
 # redis                       # rate limiter (rate-limiting week)
 # aio-pika / aiokafka         # event pipeline (event-driven week)
 # opentelemetry-sdk           # tracing week

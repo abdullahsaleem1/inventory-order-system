@@ -25,6 +25,10 @@ class UserRepository:
         row = result.scalar_one_or_none()
         return self._to_domain(row) if row else None
 
+    async def get_by_id(self, user_id) -> User | None:
+        row = await self._session.get(UserModel, user_id)
+        return self._to_domain(row) if row else None
+
     async def add(self, entity: User) -> User:
         row = UserModel(
             id=entity.id,
