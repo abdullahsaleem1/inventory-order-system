@@ -34,10 +34,9 @@ async def client():
         async with session_factory() as session:
             try:
                 yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
+            finally:
+                if session.is_active:
+                    await session.commit()
 
     app.dependency_overrides[get_db_session] = override_get_db_session
 

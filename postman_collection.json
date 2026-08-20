@@ -1,12 +1,13 @@
 {
   "info": {
     "name": "Inventory & Order Management System",
-    "description": "Auth (register/login/OAuth2 token/me) added in Week 3. Health/readiness, Inventory and Orders endpoints included from earlier weeks. Set {{accessToken}} via a Login request script to call protected endpoints.",
+    "description": "Complete API collection: Auth (register/login/OAuth2 token/refresh/logout/logout-all/me), Health/readiness, Inventory (CRUD + stock operations), and Orders (CRUD + confirm/cancel). Run 'Login' first to capture {{accessToken}} and {{refreshToken}} for protected calls.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8000" },
-    { "key": "accessToken", "value": "" }
+    { "key": "accessToken", "value": "" },
+    { "key": "refreshToken", "value": "" }
   ],
   "item": [
     {
@@ -43,8 +44,23 @@
               "mode": "raw",
               "raw": "{\n  \"email\": \"alice@example.com\",\n  \"full_name\": \"Alice Smith\",\n  \"password\": \"S3curePass!\",\n  \"role\": \"CUSTOMER\"\n}"
             },
-            "description": "Creates a user and returns the profile plus a short-lived Bearer access token. Password min 8 chars."
-          }
+            "description": "Creates a user and returns the profile plus a short-lived Bearer access token and a long-lived refresh token. Password min 8 chars. Returns 409 if email already exists."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (pm.response.code === 201 && json.access_token) {",
+                  "  pm.collectionVariables.set('accessToken', json.access_token);",
+                  "  pm.collectionVariables.set('refreshToken', json.refresh_token);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
         },
         {
           "name": "Login - POST /auth/login",
@@ -53,7 +69,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
             "body": { "mode": "raw", "raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"S3curePass!\"\n}" },
-            "description": "Exchanges email+password for a short-lived access token. Saves the token into the {{accessToken}} collection variable for protected calls.",
+            "description": "Exchanges email+password for a short-lived access token and a long-lived refresh token. Saves both into collection variables for protected calls. Returns 401 for wrong credentials.",
             "event": [
               {
                 "listen": "test",
@@ -62,6 +78,7 @@
                     "const json = pm.response.json();",
                     "if (pm.response.code === 200 && json.access_token) {",
                     "  pm.collectionVariables.set('accessToken', json.access_token);",
+                    "  pm.collectionVariables.set('refreshToken', json.refresh_token);",
                     "}"
                   ],
                   "type": "text/javascript"
@@ -84,7 +101,71 @@
                 { "key": "password", "value": "S3curePass!" }
               ]
             },
-            "description": "OAuth2.0 Resource Owner Password Credentials grant. Same token response as /auth/login."
+            "description": "OAuth2.0 Resource Owner Password Credentials grant (RFC 6749). Same token response as /auth/login. This is the tokenUrl wired into Swagger's Authorize button.",
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "exec": [
+                    "const json = pm.response.json();",
+                    "if (pm.response.code === 200 && json.access_token) {",
+                    "  pm.collectionVariables.set('accessToken', json.access_token);",
+                    "  pm.collectionVariables.set('refreshToken', json.refresh_token);",
+                    "}"
+                  ],
+                  "type": "text/javascript"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "Refresh Token - POST /auth/refresh",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] },
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}" },
+            "description": "Rotates a valid refresh token for a fresh access/refresh token pair (sliding window). The old refresh token is revoked. If a revoked token is replayed, the entire token family is terminated. Returns 401 for invalid/expired/revoked tokens.",
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "exec": [
+                    "const json = pm.response.json();",
+                    "if (pm.response.code === 200 && json.access_token) {",
+                    "  pm.collectionVariables.set('accessToken', json.access_token);",
+                    "  pm.collectionVariables.set('refreshToken', json.refresh_token);",
+                    "}"
+                  ],
+                  "type": "text/javascript"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "Logout - POST /auth/logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/auth/logout", "host": ["{{baseUrl}}"], "path": ["auth", "logout"] },
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}" },
+            "description": "Revokes the refresh token and blacklists the current access token. After logout, both tokens are permanently invalid. The refresh token in the body is optional — the access token blacklist still applies."
+          }
+        },
+        {
+          "name": "Logout All - POST /auth/logout-all",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/auth/logout-all", "host": ["{{baseUrl}}"], "path": ["auth", "logout-all"] },
+            "description": "Revokes EVERY active refresh token for the authenticated user, ending all sessions. Existing access tokens remain valid until they expire (default 15 minutes)."
           }
         },
         {
@@ -93,7 +174,7 @@
             "method": "GET",
             "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
             "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] },
-            "description": "Returns the currently authenticated user. Requires a valid Bearer access token (set by running Login first)."
+            "description": "Returns the currently authenticated user profile. Requires a valid Bearer access token (set by running Login or Register first). Returns 401 if token is missing, expired, or invalid."
           }
         }
       ]
@@ -102,47 +183,63 @@
       "name": "Inventory",
       "item": [
         {
-          "name": "Create Product",
+          "name": "Create Product (ADMIN/MANAGER)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
             "url": { "raw": "{{baseUrl}}/inventory/products", "host": ["{{baseUrl}}"], "path": ["inventory", "products"] },
             "body": {
               "mode": "raw",
               "raw": "{\n  \"sku\": \"EL-0001\",\n  \"name\": \"Wireless Mouse\",\n  \"price_cents\": 2999,\n  \"quantity_on_hand\": 100\n}"
-            }
+            },
+            "description": "Creates a new product. Requires ADMIN or MANAGER role. Returns 401 if unauthenticated, 403 if insufficient permissions, 409 if SKU already exists."
           }
         },
         {
           "name": "List Products",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/inventory/products?limit=100&offset=0", "host": ["{{baseUrl}}"], "path": ["inventory", "products"], "query": [{ "key": "limit", "value": "100" }, { "key": "offset", "value": "0" }] }
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/inventory/products?limit=100&offset=0", "host": ["{{baseUrl}}"], "path": ["inventory", "products"], "query": [{ "key": "limit", "value": "100" }, { "key": "offset", "value": "0" }] },
+            "description": "Lists all products with pagination. Requires any authenticated role (ADMIN, MANAGER, STAFF, CUSTOMER)."
           }
         },
         {
           "name": "Get Product by ID",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/inventory/products/:productId", "host": ["{{baseUrl}}"], "path": ["inventory", "products", ":productId"], "variable": [{ "key": "productId", "value": "" }] }
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/inventory/products/:productId", "host": ["{{baseUrl}}"], "path": ["inventory", "products", ":productId"], "variable": [{ "key": "productId", "value": "" }] },
+            "description": "Gets a product by its UUID. Requires any authenticated role. Returns 404 if not found."
           }
         },
         {
-          "name": "Reserve Stock",
+          "name": "Reserve Stock (ADMIN/MANAGER/STAFF)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
             "url": { "raw": "{{baseUrl}}/inventory/products/:productId/reserve", "host": ["{{baseUrl}}"], "path": ["inventory", "products", ":productId", "reserve"], "variable": [{ "key": "productId", "value": "" }] },
-            "body": { "mode": "raw", "raw": "{\n  \"quantity\": 1\n}" }
+            "body": { "mode": "raw", "raw": "{\n  \"quantity\": 1\n}" },
+            "description": "Reserves stock for a product. Requires ADMIN, MANAGER, or STAFF role. Returns 409 if insufficient stock, 404 if product not found."
           }
         },
         {
-          "name": "Restock",
+          "name": "Restock (ADMIN/MANAGER)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
             "url": { "raw": "{{baseUrl}}/inventory/products/:productId/restock", "host": ["{{baseUrl}}"], "path": ["inventory", "products", ":productId", "restock"], "variable": [{ "key": "productId", "value": "" }] },
-            "body": { "mode": "raw", "raw": "{\n  \"quantity\": 10\n}" }
+            "body": { "mode": "raw", "raw": "{\n  \"quantity\": 10\n}" },
+            "description": "Restocks a product. Requires ADMIN or MANAGER role. Returns 403 if STAFF or CUSTOMER."
           }
         }
       ]
@@ -154,33 +251,43 @@
           "name": "Create Order",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
             "url": { "raw": "{{baseUrl}}/orders", "host": ["{{baseUrl}}"], "path": ["orders"] },
             "body": {
               "mode": "raw",
               "raw": "{\n  \"customer_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"lines\": [\n    { \"product_id\": \"00000000-0000-0000-0000-000000000000\", \"quantity\": 1, \"unit_price_cents\": 2999 }\n  ]\n}"
-            }
+            },
+            "description": "Creates a new order. Requires any authenticated role. Returns 201 on success."
           }
         },
         {
           "name": "Get Order by ID",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/orders/:orderId", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId"], "variable": [{ "key": "orderId", "value": "" }] }
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/orders/:orderId", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId"], "variable": [{ "key": "orderId", "value": "" }] },
+            "description": "Gets an order by its UUID. Requires any authenticated role. Returns 404 if not found."
           }
         },
         {
-          "name": "Confirm Order",
+          "name": "Confirm Order (ADMIN/MANAGER)",
           "request": {
             "method": "POST",
-            "url": { "raw": "{{baseUrl}}/orders/:orderId/confirm", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId", "confirm"], "variable": [{ "key": "orderId", "value": "" }] }
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/orders/:orderId/confirm", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId", "confirm"], "variable": [{ "key": "orderId", "value": "" }] },
+            "description": "Confirms an order, transitioning it from PENDING to CONFIRMED. Requires ADMIN or MANAGER role. Returns 403 for STAFF/CUSTOMER, 409 if not in a confirmable state."
           }
         },
         {
-          "name": "Cancel Order",
+          "name": "Cancel Order (ADMIN/MANAGER/STAFF)",
           "request": {
             "method": "POST",
-            "url": { "raw": "{{baseUrl}}/orders/:orderId/cancel", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId", "cancel"], "variable": [{ "key": "orderId", "value": "" }] }
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/orders/:orderId/cancel", "host": ["{{baseUrl}}"], "path": ["orders", ":orderId", "cancel"], "variable": [{ "key": "orderId", "value": "" }] },
+            "description": "Cancels an order. Requires ADMIN, MANAGER, or STAFF role. Returns 403 for CUSTOMER, 409 if not in a cancellable state."
           }
         }
       ]

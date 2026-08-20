@@ -82,25 +82,60 @@ structurally identical:**
 - `request_id` — echoes the `X-Request-ID` header so errors can be correlated
   with server-side structured logs.
 
-## Authentication (Week 3)
+## Authentication & Authorization (Weeks 3–4)
 
 A from-scratch OAuth2.0-compatible authorization server in the Identity
 bounded context. No Keycloak/Authlib — the token endpoint, password hashing,
-and JWT signing are all implemented in this codebase.
+JWT signing, refresh token rotation, and RBAC are all implemented in this codebase.
 
 ### Endpoints
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| `POST` | `/auth/register` | Create a user; returns profile + short-lived access token |
-| `POST` | `/auth/login` | JSON login; returns a short-lived Bearer access token |
-| `POST` | `/oauth/token` | **OAuth2.0 password grant** (form-encoded); returns a token |
+| `POST` | `/auth/register` | Create a user; returns profile + token pair |
+| `POST` | `/auth/login` | JSON login; returns access + refresh token pair |
+| `POST` | `/auth/refresh` | Sliding-window refresh token rotation; returns new token pair |
+| `POST` | `/auth/logout` | Revoke refresh token + blacklist access token |
+| `POST` | `/auth/logout-all` | Terminate every session for the authenticated user |
+| `POST` | `/oauth/token` | **OAuth2.0 password grant** (form-encoded); returns a token pair |
 | `GET`  | `/auth/me` | Current user (requires `Authorization: Bearer <token>`) |
 
 The `/oauth/token` endpoint implements the RFC 6749 Resource Owner Password
 Credentials grant and is the `tokenUrl` wired into Swagger's **Authorize**
 button. Access tokens are **short-lived by default (15 minutes)** and must be
 sent as `Authorization: Bearer <token>`.
+
+### Sliding-Window Refresh Tokens
+Every login/registration returns a **refresh token** (opaque, 64-byte
+`secrets.token_urlsafe`) alongside the JWT access token. Refresh tokens are
+stored as **irreversible SHA-256 hashes** in the database — a DB breach never
+leaks usable tokens.
+
+Rotation follows a sliding window: each use of a refresh token revokes it
+and issues a new one in the **same token family**. If a revoked refresh
+token is replayed (theft signal), the **entire family is terminated** —
+all sibling refresh tokens for that session are revoked immediately.
+Refresh tokens expire after 7 days (configurable via `REFRESH_TOKEN_EXPIRE_DAYS`).
+
+### Role-Based Access Control (RBAC)
+Four roles exist: `ADMIN`, `MANAGER`, `STAFF`, `CUSTOMER`. The role is
+embedded in every JWT access token and enforced on every protected endpoint
+via the `require_roles()` FastAPI dependency (`src/core/auth.py`):
+
+| Endpoint | Allowed Roles |
+| -------- | ------------- |
+| `POST /inventory/products` | ADMIN, MANAGER |
+| `POST /inventory/products/{id}/restock` | ADMIN, MANAGER |
+| `POST /inventory/products/{id}/reserve` | ADMIN, MANAGER, STAFF |
+| `GET /inventory/products` | Any authenticated role |
+| `GET /inventory/products/{id}` | Any authenticated role |
+| `POST /orders` | Any authenticated role |
+| `GET /orders/{id}` | Any authenticated role |
+| `POST /orders/{id}/confirm` | ADMIN, MANAGER |
+| `POST /orders/{id}/cancel` | ADMIN, MANAGER, STAFF |
+
+Unauthorized access returns `403 FORBIDDEN` with code `INSUFFICIENT_PERMISSIONS`.
+Missing or expired tokens return `401 UNAUTHORIZED`.
 
 ### Password hashing & salt management
 Passwords are hashed with **bcrypt** at cost factor 12
@@ -202,24 +237,32 @@ alembic downgrade -1                               # roll back one migration
 
 ### Postman / Insomnia
 Import [`postman_collection.json`](./postman_collection.json) — includes auth
-(register/login/OAuth2 token/me), health/readiness, and every Inventory and
-Orders endpoint. Run the **Login** request once and the returned token is
-stored in the `{{accessToken}}` collection variable for protected calls.
+(register/login/OAuth2 token/refresh/logout/logout-all/me), health/readiness,
+and every Inventory and Orders endpoint. Run the **Login** request once and
+the returned token is stored in the `{{accessToken}}` collection variable for
+protected calls. Refresh, logout, and logout-all endpoints are pre-configured.
 
 ### Running Tests
 ```bash
 pip install -r requirements.txt
-pytest
+pytest -v
 ```
 
-Tests:
-- `tests/identity/test_auth_endpoints.py` — **integration tests** for the
-  auth endpoints. They run the real FastAPI app end-to-end (routing,
-  middleware, exception handlers, database) against an in-memory SQLite DB
-  injected via a dependency override, so no PostgreSQL is needed.
-- `tests/identity/test_password_hasher.py` — bcrypt hashing/salt/verify unit tests.
-- `tests/identity/test_jwt_service.py` — JWT signing, expiry, tamper/signature/audience rejection.
-- `tests/inventory/test_product_domain.py` — existing domain unit tests (still passing).
+**73 integration tests** (all passing), organized as:
+
+| Test File | Tests | Coverage |
+| --------- | ----- | -------- |
+| `tests/identity/test_auth_endpoints.py` | 15 | Register, login, OAuth2 token, /auth/me, expired/tampered tokens, error envelope |
+| `tests/identity/test_refresh_tokens.py` | 8 | Sliding-window rotation, reuse/theft detection, chained rotations, logout revocation |
+| `tests/identity/test_rbac.py` | 18 | RBAC enforcement: create product, restock, reserve, list, confirm, cancel — per role |
+| `tests/identity/test_security.py` | 19 | Expired/tampered/missing tokens across inventory/orders/auth, RBAC wrong-role, blacklist persistence, error envelope consistency |
+| `tests/inventory/test_product_domain.py` | 8 | Product domain unit tests (stock rules, SKU validation) |
+| `tests/identity/test_password_hasher.py` | 3 | bcrypt hashing, salt, verify |
+| `tests/identity/test_jwt_service.py` | 2 | JWT signing, expiry, tamper/signature/audience rejection |
+
+Integration tests run against an **in-memory SQLite** DB injected via a
+`get_db_session` dependency override — no PostgreSQL required. The full
+HTTP stack is exercised (routing, middleware, exception handlers, DB access).
 
 ## Weekly Progress Log
 
@@ -286,14 +329,42 @@ in `docker-compose.yml`.
 
 <!-- Next week's entry goes here -->
 
+### Week 4 — Security Hardening, Swagger Enhancement & Test Suite
+- **Sliding-window refresh tokens** with replay/theft detection: each use
+  rotates the token; a revoked token reuse terminates the entire family.
+  Refresh tokens stored as SHA-256 hashes (never plaintext).
+- **Access token blacklisting**: logout adds the token's `jti` to a
+  blacklist checked on every authenticated request.
+- **Logout & logout-all**: single-session and global session termination.
+- **RBAC enforcement on all protected endpoints** via `require_roles()`
+  dependency — missing/invalid tokens → 401; wrong role → 403.
+- **Portable ORM models**: replaced `PG_UUID` with SQLAlchemy's portable
+  `Uuid` type so integration tests run on in-memory SQLite without
+  PostgreSQL-specific adapters.
+- **Swagger/OpenAPI enhancements**: every endpoint documents error responses
+  (`401`, `403`, `404`, `409`) with the `ErrorResponse` model; custom OpenAPI
+  schema adds `OAuth2PasswordBearer` security scheme and global security.
+- **Postman collection** updated with refresh, logout, logout-all endpoints
+  and Authorization headers.
+- **73 integration tests** (up from 30): 19 new security tests covering
+  expired/tampered/missing tokens, RBAC role enforcement across all
+  endpoints, blacklist persistence, error envelope consistency; plus 18
+  RBAC tests and 8 refresh token tests.
+- **Bug fixes**: added `is_expired`/`is_revoked` properties to
+  `RefreshTokenModel` for ORM-level token state; fixed `revoke_family`
+  to flush SQL before raising (ensures theft detection persists);
+  protected previously-public GET endpoints with `get_current_user`.
+- **Full test suite**: `pytest -v` — 73 passed, 0 failed.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
 - [x] DB migrations + seed data
 - [x] Health/readiness endpoints
 - [x] OAuth2.0 password grant + JWT short-lived access tokens + standardized errors (Week 3)
-- [ ] Sliding-window refresh tokens
-- [ ] RBAC permission checks (roles already issued in tokens)
+- [x] Sliding-window refresh tokens + access token blacklisting (Week 4)
+- [x] RBAC permission checks with role enforcement on all endpoints (Week 4)
+- [x] Security hardening + Swagger enhancement + 73 integration tests (Week 4)
 - [ ] Event-driven order pipeline (RabbitMQ/Kafka) with DLQ + retry logic
 - [ ] CQRS: write-optimized DB + read-optimized store
 - [ ] Redis-backed token bucket rate limiter (from scratch)

@@ -6,6 +6,9 @@ which the global handlers serialize into the standardized error envelope.
 """
 from src.contexts.identity.api.schemas import (
     LoginRequest,
+    LogoutRequest,
+    MessageResponse,
+    RefreshRequest,
     RegisterRequest,
     RegisterResponse,
     TokenResponse,
@@ -27,6 +30,8 @@ class AuthController:
     def __init__(self, service: AuthService) -> None:
         self._service = service
 
+    # ---- registration --------------------------------------------------------
+
     async def register(self, payload: RegisterRequest) -> RegisterResponse:
         try:
             user = await self._service.register(
@@ -40,17 +45,25 @@ class AuthController:
         except InvalidPasswordError as exc:
             raise BadRequestError(str(exc), code="INVALID_PASSWORD") from exc
 
+        token_data = await self._service.create_token_pair(user)
         return RegisterResponse(
             user=UserResponse.model_validate(user, from_attributes=True),
-            access_token=self._service.create_access_token(user),
-            token_type="bearer",
-            expires_in=self._service.access_token_expires_in,
+            **token_data,
         )
+
+    # ---- login / OAuth2 token ------------------------------------------------
 
     async def login(self, payload: LoginRequest) -> TokenResponse:
         return await self._authenticate(email=payload.email, password=payload.password)
 
-    async def oauth2_token(self, *, grant_type: str, username: str, password: str) -> TokenResponse:
+    async def oauth2_token(
+        self, *, grant_type: str, username: str, password: str
+    ) -> TokenResponse:
+        if grant_type == "refresh_token":
+            raise BadRequestError(
+                "Use POST /auth/refresh with a JSON body for refresh grants",
+                code="unsupported_grant_type",
+            )
         if grant_type != "password":
             raise BadRequestError(
                 "Only the 'password' grant type is supported",
@@ -66,11 +79,10 @@ class AuthController:
                 "Incorrect email or password",
                 code="invalid_grant",
             ) from exc
-        return TokenResponse(
-            access_token=self._service.create_access_token(user),
-            token_type="bearer",
-            expires_in=self._service.access_token_expires_in,
-        )
+        token_data = await self._service.create_token_pair(user)
+        return TokenResponse(**token_data)
+
+    # ---- current user --------------------------------------------------------
 
     async def me(self, token: str) -> UserResponse:
         try:
@@ -82,3 +94,33 @@ class AuthController:
         except InactiveUserError as exc:
             raise UnauthorizedError(str(exc), code="account_disabled") from exc
         return UserResponse.model_validate(user, from_attributes=True)
+
+    # ---- refresh -------------------------------------------------------------
+
+    async def refresh(self, payload: RefreshRequest) -> TokenResponse:
+        try:
+            token_data = await self._service.refresh_tokens(refresh_token=payload.refresh_token)
+        except TokenExpiredError as exc:
+            raise UnauthorizedError("Refresh token has expired", code="token_expired") from exc
+        except InvalidTokenError as exc:
+            raise UnauthorizedError(str(exc), code="invalid_refresh_token") from exc
+        except InactiveUserError as exc:
+            raise UnauthorizedError(str(exc), code="account_disabled") from exc
+        return TokenResponse(**token_data)
+
+    # ---- logout / logout-all -------------------------------------------------
+
+    async def logout(
+        self, access_token: str | None, payload: LogoutRequest | None = None
+    ) -> MessageResponse:
+        refresh_token = payload.refresh_token if payload else None
+        await self._service.logout(access_token=access_token, refresh_token=refresh_token)
+        return MessageResponse(message="Logged out successfully")
+
+    async def logout_all(self, token: str) -> MessageResponse:
+        try:
+            user = await self._service.get_user_from_token(token)
+        except (TokenExpiredError, InvalidTokenError, InactiveUserError):
+            return MessageResponse(message="Logged out from all sessions")
+        await self._service.logout_all(user=user)
+        return MessageResponse(message="Logged out from all sessions")

@@ -5,6 +5,7 @@ system (health/ready) routes.
 This file stays thin — actual logic lives in the bounded contexts.
 """
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 
 from src.contexts.identity.api.routes import oauth2_router as identity_oauth2_router
 from src.contexts.identity.api.routes import router as identity_router
@@ -23,8 +24,16 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Distributed inventory & order management system — DDD, CQRS, event-driven.",
-    version="0.3.0",
+    description=(
+        "Distributed inventory & order management system built with DDD "
+        "bounded contexts, strict layered architecture, sliding-window "
+        "refresh tokens, role-based access control (RBAC), and a from-scratch "
+        "OAuth2.0-compatible authorization server. v0.5 adds RBAC enforcement, "
+        "refresh token rotation with theft detection, and 73 integration tests."
+    ),
+    version="0.5.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 app.add_middleware(RequestLoggingMiddleware)
@@ -35,6 +44,41 @@ app.include_router(identity_router)
 app.include_router(identity_oauth2_router)
 app.include_router(inventory_router)
 app.include_router(orders_router)
+
+
+def custom_openapi() -> dict:
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema["components"] = schema.get("components", {})
+    schema["components"]["securitySchemes"] = {
+        "OAuth2PasswordBearer": {
+            "type": "oauth2",
+            "flows": {
+                "password": {
+                    "tokenUrl": "/oauth/token",
+                    "scopes": {},
+                }
+            },
+            "description": (
+                "OAuth2.0 Resource Owner Password Credentials grant. "
+                "Use the 'Authorize' button above to obtain a Bearer token. "
+                "Access tokens expire in 15 minutes; use the refresh token "
+                "to obtain a new pair via POST /auth/refresh."
+            ),
+        }
+    }
+    schema["security"] = [{"OAuth2PasswordBearer": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
 
 
 @app.on_event("startup")

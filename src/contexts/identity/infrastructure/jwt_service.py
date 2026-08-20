@@ -27,16 +27,22 @@ class JwtTokenService:
         issuer: str,
         audience: str,
         access_token_expire_minutes: int,
+        refresh_token_expire_days: int = 7,
     ) -> None:
         self._secret_key = secret_key
         self._algorithm = algorithm
         self._issuer = issuer
         self._audience = audience
         self._access_token_expire_minutes = access_token_expire_minutes
+        self._refresh_token_expire_days = refresh_token_expire_days
 
     @property
     def access_token_expires_in(self) -> int:
         return self._access_token_expire_minutes * 60
+
+    @property
+    def refresh_token_expires_in(self) -> int:
+        return self._refresh_token_expire_days * 86400
 
     def create_access_token(self, user: User) -> str:
         now = datetime.now(timezone.utc)
@@ -66,3 +72,21 @@ class JwtTokenService:
             raise TokenExpiredError("Access token has expired") from exc
         except jwt.InvalidTokenError as exc:
             raise InvalidTokenError("Invalid or malformed access token") from exc
+
+    def decode_access_token_unverified(self, token: str) -> dict | None:
+        """Decode a token without verifying expiry — used only for logout/revocation
+        to extract the jti and user id from an expired token."""
+        try:
+            return jwt.decode(
+                token,
+                self._secret_key,
+                algorithms=[self._algorithm],
+                issuer=self._issuer,
+                audience=self._audience,
+                options={
+                    "require": ["sub", "iss", "aud"],
+                    "verify_exp": False,
+                },
+            )
+        except jwt.InvalidTokenError:
+            return None

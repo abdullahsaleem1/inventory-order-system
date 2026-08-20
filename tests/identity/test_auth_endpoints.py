@@ -50,13 +50,15 @@ def decode_token(token: str) -> dict:
 # --- registration ---------------------------------------------------------
 
 
-async def test_register_creates_user_and_issues_token(client: AsyncClient) -> None:
+async def test_register_creates_user_and_issues_token_pair(client: AsyncClient) -> None:
     resp = await client.post("/auth/register", json=REGISTER_PAYLOAD)
     assert resp.status_code == 201
 
     body = resp.json()
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    assert body["refresh_expires_in"] == settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
+    assert isinstance(body["refresh_token"], str) and body["refresh_token"]
     assert body["user"]["email"] == "alice@example.com"
     assert body["user"]["role"] == "CUSTOMER"
     assert body["user"]["is_active"] is True
@@ -103,7 +105,7 @@ async def test_register_password_over_bcrypt_byte_limit_returns_400(client: Asyn
 # --- login -----------------------------------------------------------------
 
 
-async def test_login_success_issues_short_lived_token(client: AsyncClient) -> None:
+async def test_login_success_issues_token_pair(client: AsyncClient) -> None:
     await client.post("/auth/register", json=REGISTER_PAYLOAD)
     resp = await client.post(
         "/auth/login", json={"email": "alice@example.com", "password": "S3curePass!"}
@@ -111,9 +113,10 @@ async def test_login_success_issues_short_lived_token(client: AsyncClient) -> No
     assert resp.status_code == 200
 
     body = resp.json()
-    assert set(body) == {"access_token", "token_type", "expires_in"}
+    assert set(body) == {"access_token", "refresh_token", "token_type", "expires_in", "refresh_expires_in"}
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    assert body["refresh_expires_in"] == settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
 
     claims = decode_token(body["access_token"])
     assert claims["email"] == "alice@example.com"
@@ -157,7 +160,9 @@ async def test_oauth2_password_grant_success(client: AsyncClient) -> None:
     body = resp.json()
     assert body["token_type"] == "bearer"
     assert body["access_token"]
+    assert body["refresh_token"]
     assert body["expires_in"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    assert body["refresh_expires_in"] == settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
     assert decode_token(body["access_token"])["email"] == "alice@example.com"
 
 
