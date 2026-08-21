@@ -68,3 +68,8 @@ class ConflictError(AppError):
 class UnprocessableEntityError(AppError):
     status_code = 422
     code = "UNPROCESSABLE_ENTITY"
+
+
+class ServiceUnavailableError(AppError):
+    status_code = 503
+    code = "SERVICE_UNAVAILABLE"

@@ -12,12 +12,18 @@ class OrderService:
     def __init__(self, repository: OrderRepository) -> None:
         self._repo = repository
 
-    async def create_order(self, customer_id: UUID, lines: list[dict]) -> Order:
-        order = Order(
+    def build_order(self, customer_id: UUID, lines: list[dict]) -> Order:
+        """Construct + validate an Order aggregate WITHOUT persisting it.
+
+        Since Week 5, creation is event-driven: the API builds and validates
+        the aggregate here, then publishes `order.created` — persistence
+        happens asynchronously in the orders.order-created.persistence
+        consumer group.
+        """
+        return Order(
             customer_id=customer_id,
             lines=[OrderLine(**line) for line in lines],
         )
-        return await self._repo.add(order)
 
     async def get_order(self, order_id: UUID) -> Order:
         order = await self._repo.get_by_id(order_id)

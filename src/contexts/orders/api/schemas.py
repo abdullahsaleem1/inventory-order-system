@@ -27,3 +27,18 @@ class OrderResponse(BaseModel):
     status: str
     lines: list[OrderLineResponse]
     total_cents: int
+
+
+class OrderAcceptedResponse(BaseModel):
+    """202 response body — the order was accepted and an event was published.
+
+    Persistence happens asynchronously in the orders.order-created.persistence
+    consumer group; the `event_id` identifies the published event.
+    """
+
+    id: UUID
+    customer_id: UUID
+    status: str
+    lines: list[OrderLineResponse]
+    total_cents: int
+    event_id: UUID

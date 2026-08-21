@@ -16,6 +16,9 @@ PyJWT==2.13.0               # JWT signing/verification (HS256)
 email-validator==2.3.0      # EmailStr schema validation
 python-multipart==0.0.32    # application/x-www-form-urlencoded (OAuth2 token endpoint)
 
+# --- event pipeline (Week 5) ---
+aio-pika==9.5.5              # async RabbitMQ client (robust connections, publisher confirms)
+
 # --- test tooling ---
 pytest==9.1.1
 pytest-asyncio==1.4.0
@@ -24,5 +27,4 @@ aiosqlite==0.22.1           # in-memory DB for auth integration tests
 
 # --- to be added in later weeks ---
 # redis                       # rate limiter (rate-limiting week)
-# aio-pika / aiokafka         # event pipeline (event-driven week)
 # opentelemetry-sdk           # tracing week

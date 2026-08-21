@@ -16,6 +16,7 @@ from src.core.error_handlers import register_exception_handlers
 from src.core.logging_config import configure_logging, get_logger
 from src.core.middleware import RequestLoggingMiddleware
 from src.core.system_routes import router as system_router
+from src.shared.messaging.provider import build_event_publisher, close_event_publisher
 
 configure_logging()
 logger = get_logger(__name__)
@@ -27,11 +28,13 @@ app = FastAPI(
     description=(
         "Distributed inventory & order management system built with DDD "
         "bounded contexts, strict layered architecture, sliding-window "
-        "refresh tokens, role-based access control (RBAC), and a from-scratch "
-        "OAuth2.0-compatible authorization server. v0.5 adds RBAC enforcement, "
-        "refresh token rotation with theft detection, and 73 integration tests."
+        "refresh tokens, role-based access control (RBAC), a from-scratch "
+        "OAuth2.0-compatible authorization server, and event-driven order "
+        "creation via RabbitMQ (order.created -> durable queues -> consumer "
+        "groups). v0.6 makes order creation fully asynchronous: POST /orders "
+        "publishes an event instead of writing to the database synchronously."
     ),
-    version="0.5.0",
+    version="0.6.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -83,9 +86,13 @@ app.openapi = custom_openapi
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    # Build the RabbitMQ publisher from settings (connection is lazy — opened
+    # on first publish and auto-reconnected thereafter).
+    build_event_publisher()
     logger.info("application_startup", extra={"env": settings.ENV})
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    await close_event_publisher()
     logger.info("application_shutdown")

@@ -4,8 +4,9 @@ System-level routes: liveness and readiness checks.
 /health  — liveness: is the process up? Never touches the DB. Used by
            orchestrators to decide whether to restart the container.
 /ready   — readiness: can the service actually serve traffic right now?
-           Checks the DB connection. Used by load balancers/orchestrators
-           to decide whether to route traffic to this instance.
+           Checks the DB connection and (since Week 5) the RabbitMQ broker.
+           Used by load balancers/orchestrators to decide whether to route
+           traffic to this instance.
 """
 from typing import Literal
 
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.logging_config import get_logger
 from src.shared.infrastructure.database import get_db_session
+from src.shared.messaging.provider import probe_broker
 
 router = APIRouter(tags=["System"])
 logger = get_logger(__name__)
@@ -28,6 +30,7 @@ class HealthResponse(BaseModel):
 class ReadinessResponse(BaseModel):
     status: Literal["ready", "not_ready"]
     database: Literal["up", "down"]
+    broker: Literal["up", "down", "disabled"]
 
 
 @router.get("/health", response_model=HealthResponse, summary="Liveness check")
@@ -41,11 +44,17 @@ async def readiness_check(
     response: Response,
     session: AsyncSession = Depends(get_db_session),
 ) -> ReadinessResponse:
-    """Returns 200 only if the service can reach the database; 503 otherwise."""
+    """Returns 200 only if the DB and the event broker are reachable; 503 otherwise."""
     try:
         await session.execute(text("SELECT 1"))
-        return ReadinessResponse(status="ready", database="up")
+        database = "up"
     except Exception:
         logger.exception("readiness_check_failed")
+        database = "down"
+
+    broker = await probe_broker()
+
+    ready = database == "up" and broker != "down"
+    if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return ReadinessResponse(status="not_ready", database="down")
+    return ReadinessResponse(status="ready" if ready else "not_ready", database=database, broker=broker)

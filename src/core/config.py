@@ -31,8 +31,16 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # --- Message broker — filled in during event-driven pipeline week ---
-    BROKER_URL: str | None = None  # e.g. amqp://guest:guest@localhost:5672/ or Kafka bootstrap servers
+    # --- Message broker (RabbitMQ — event-driven pipeline, Week 5) ---
+    # Leave unset to disable event publishing (POST /orders then returns 503).
+    BROKER_URL: str | None = None  # e.g. amqp://guest:guest@localhost:5672/
+    EVENT_EXCHANGE: str = "inventory.orders.events"  # durable topic exchange
+    ORDER_CREATED_ROUTING_KEY: str = "order.created"
+    ORDERS_PERSISTENCE_QUEUE: str = "orders.order-created.persistence"  # consumer group 1
+    ORDERS_AUDIT_QUEUE: str = "orders.order-created.audit"              # consumer group 2
+    DEAD_LETTER_EXCHANGE: str = "inventory.orders.dlx"  # dead-letter topic exchange
+    CONSUMER_PREFETCH_COUNT: int = 10
+    CONSUMER_MAX_RETRIES: int = 3
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod

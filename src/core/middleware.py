@@ -20,7 +20,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        request_id = str(uuid.uuid4())
+        # Honor a caller-supplied X-Request-ID (enables cross-service
+        # correlation, e.g. event.correlation_id in the message broker);
+        # otherwise mint a fresh one.
+        supplied_request_id = request.headers.get("X-Request-ID", "").strip()[:128]
+        request_id = supplied_request_id or str(uuid.uuid4())
         request.state.request_id = request_id
         start = time.perf_counter()
 
