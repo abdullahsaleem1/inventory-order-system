@@ -39,6 +39,29 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
+  # Async worker (Week 6) — a SEPARATE service that consumes `order.created`
+  # events and asynchronously deducts inventory stock. Runs in its own
+  # container alongside the API; retries failures with exponential backoff and
+  # dead-letters poison/retry-exhausted messages to
+  # orders.order-created.inventory.dlq. Scale out for more concurrent workers.
+  worker:
+    build: .
+    command: python -m scripts.worker
+    env_file:
+      - .env
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/inventory_orders
+      DEBUG: "false"
+    depends_on:
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
   db:
     image: postgres:16-alpine
     environment:

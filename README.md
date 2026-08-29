@@ -4,13 +4,14 @@ A production-grade backend system built for the Parallax Labs backend internship
 Implements Domain-Driven Design, a strictly layered architecture, a **from-scratch
 OAuth2.0/JWT authorization server**, RBAC, sliding-window refresh tokens,
 **event-driven order creation over RabbitMQ** (durable topic exchange, consumer
-groups, retries + dead-lettering), CQRS groundwork, and structured JSON logging —
-containerized with Docker Compose.
+groups, retries + dead-lettering), **async order processing in a separate
+worker service** (inventory deduction with exponential-backoff retries), CQRS
+groundwork, and structured JSON logging — containerized with Docker Compose.
 
 ## Tech Stack
 - **Language/Framework:** Python 3.12+ (verified on 3.14), FastAPI
 - **Database:** PostgreSQL (async, via SQLAlchemy 2.0 + asyncpg)
-- **Message broker:** RabbitMQ 3.13 (`aio-pika`) — durable queues, publisher confirms, DLQ
+- **Message broker:** RabbitMQ 3.13 (`aio-pika`) — durable queues, publisher confirms, DLQ, exponential-backoff retries
 - **Migrations:** Alembic
 - **Auth:** bcrypt password hashing + HS256-signed JWTs (PyJWT), OAuth2.0 password grant
 - **Testing:** pytest + httpx, in-memory SQLite (aiosqlite) for DB-backed integration tests
@@ -29,6 +30,8 @@ the event pipeline (added in a later week).
 src/
 ├── contexts/
 │   ├── inventory/          # Inventory bounded context (Product entity, stock rules)
+│   │   ├── events.py       # order.created -> stock-deduction intent bridge (Week 6)
+│   │   └── services/       # DeductInventoryHandler — async worker handler (Week 6)
 │   ├── orders/             # Orders bounded context (Order entity, status transitions)
 │   │   └── events.py       # order.created <-> Order aggregate bridge (Week 5)
 │   └── identity/           # Identity bounded context — OAuth2.0 auth server
@@ -39,7 +42,7 @@ src/
 │       ├── controllers/    # AuthController (schema <-> service, error mapping)
 │       └── api/            # Routes + Pydantic schemas (register, login, /oauth/token, me)
 ├── shared/                 # Cross-context kernel: base Entity, DB session, AppError hierarchy
-│   └── messaging/          # Event envelope, RabbitMQ publisher/consumer, provider (Week 5)
+│   └── messaging/          # Event envelope, RabbitMQ publisher/consumer, provider (Weeks 5-6)
 ├── core/                   # Config, structured logging, middleware, error handlers, health routes
 └── main.py                 # FastAPI app wiring
 ```
@@ -256,7 +259,7 @@ POST /orders ──publish──>  routing key: order.created                  �
 | Message survival across broker restarts | Persistent `delivery_mode` + durable queues/exchanges |
 | Consumer crash safety | Manual acknowledgement — `ack` only after the handler succeeds |
 | At-least-once duplicates | Handlers are **idempotent**: the persistence handler skips already-persisted order IDs (`event_duplicate_skipped`) |
-| Transient handler failures | Bounded retries — message is republished with `x-retry-count` header, up to `CONSUMER_MAX_RETRIES` (3), then rejected to the DLQ |
+| Transient handler failures | Retries with **exponential backoff** (Week 6) — parked in per-attempt TTL retry queues (`base * 2^(n-1)`), up to `CONSUMER_MAX_RETRIES` (3), then rejected to the DLQ; earlier Week 5 builds used backoff-free republishing |
 | Poison messages (bad payload/type) | Classified as permanent → straight to DLQ, no retry burn |
 | Auto-reconnect | `aio_pika.connect_robust` on both publisher and consumer |
 | Backpressure | Per-consumer QoS prefetch (`CONSUMER_PREFETCH_COUNT=10`) |
@@ -352,6 +355,119 @@ python -m scripts.consume_orders --group audit          # logs every event
 python -m scripts.consume_orders --drain-dlq persistence # log+ack DLQ contents
 ```
 
+## Async Order Processing — Worker Service (Week 6)
+
+Phase 2 introduces a **separate worker service** that consumes `order.created`
+events and **asynchronously deducts inventory stock**. The API stays thin (it
+only publishes); both the order-persistence consumer *and* the inventory
+worker run in their own processes/containers.
+
+```
+                        ┌──────────────────────────────────────────────────┐
+                        │        inventory.orders.events (topic)           │
+ POST /orders ─publish──>                 routing key: order.created        │
+    202 Accepted        └─────┬──────────────────┬────────────────┬────────┘
+              order.created   │                  │                │
+        ┌─────────────────────▼───────┐   ┌──────▼───────┐   ┌────▼───────────────────┐
+        │ orders.order-created.       │   │ orders.order- │   │ orders.order-created.│
+        │ persistence (API consumer, │   │ created.audit │   │ inventory            │
+        │ idempotent DB write)       │   │ (logs events) │   │ (WORKER: deduct stock)│
+        └──────────────┬─────────────┘   └──────┬────────┘   └───────────┬──────────┘
+                       │   retry stairway:      │                        │
+                       │   <queue>.retry.1..N (per-attempt TTL delay)    │
+                       │   ──expired──> re-enter events exchange          │
+        x-dead-letter  ▼                          │                       ▼
+        ┌──────────────────────────────────────────────────────────────────┐
+        │                    inventory.orders.dlx (topic)                  │
+        │   <queue>.dlq  — poison / retry-exhausted messages per group    │
+        └──────────────────────────────────────────────────────────────────┘
+```
+
+### Separate worker service
+
+`scripts/worker.py` is a dedicated entrypoint that runs the
+`orders.order-created.inventory` consumer group. In Docker Compose it is its
+own `worker` container (`command: python -m scripts.worker`), started
+alongside the `api`, `consumer`, `db`, and `rabbitmq` services. Its handler
+(`DeductInventoryHandler` in the Inventory context) loads each product named in
+the event, calls `product.reserve_stock(quantity)` against the domain model,
+and persists the new quantity — all asynchronously, off the API request path.
+
+### Asynchronous inventory deduction + idempotency
+
+The worker's handler is **idempotent** because AMQP delivery is at-least-once:
+a crash between a successful stock write and the broker `ack` would otherwise
+re-deliver the event and double-deduct. It writes one row per order to the new
+`inventory_reservation_log` table **in the same transaction** that mutates
+stock. A redelivered event finds its `order_id` already logged and skips
+(`stock_deduction_duplicate_skipped`), so exactly one deduction ever happens.
+The unique index on `order_id` also makes the guard race-safe across worker
+replicas (scale out with `docker compose up --scale worker=2`).
+
+### DLQ + retry logic with exponential backoff
+
+Transient failures are retried with **exponential backoff** rather than
+immediately. Each consumer group owns a *stairway* of durable retry queues,
+one per retry attempt:
+
+| Attempt | Delay parked in `<queue>.retry.N` |
+| ------- | --------------------------------- |
+| 1       | `base * 2^0 = 1s` |
+| 2       | `base * 2^1 = 2s` |
+| 3       | `base * 2^2 = 4s` |
+| …       | … capped at `CONSUMER_BACKOFF_MAX_SECONDS` (60s) |
+
+Mechanism: on a transient failure the message is re-published into the
+`N`-th retry queue with a **per-message TTL** (`expiration`) equal to that
+attempt's backoff delay. When the TTL expires, RabbitMQ **dead-letters** the
+message onto the main events exchange, which routes it back into the same work
+queue for the next attempt. This gives true time-based backoff using only
+RabbitMQ's built-in TTL + dead-letter facilities (no plugin). After
+`CONSUMER_MAX_RETRIES`, the message is rejected without requeue and lands in
+the group's DLQ.
+
+Error classification (which determines retry vs. dead-letter):
+
+| Failure | Class | Outcome |
+| ------- | ----- | ------- |
+| Malformed envelope (undecodable JSON) | permanent | straight to DLQ |
+| Malformed payload / unknown product / wrong event type | `PermanentMessageError` | straight to DLQ, no retry burn |
+| Insufficient stock (may be restocked later) | transient | exponential-backoff retry, then DLQ |
+
+### Observing the worker pipeline
+
+```bash
+docker compose up --build -d rabbitmq db api consumer worker
+
+# create an order (any authenticated role)
+TOKEN=$(curl -s -X POST http://localhost:8000/oauth/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=password&username=admin1@example.com&password=Password123!' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# pick a real product id so stock actually exists
+PID=$(curl -s http://localhost:8000/inventory/products -H "Authorization: Bearer $TOKEN" \
+  | python -c "import sys,json;print(json.load(sys.stdin)[0]['id'])")
+
+curl -s -X POST http://localhost:8000/orders \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"customer_id\":\"00000000-0000-0000-0000-000000000001\",
+       \"lines\":[{\"product_id\":\"$PID\",\"quantity\":2,\"unit_price_cents\":1999}]}"
+# -> 202 {"id":"...","status":"PENDING","event_id":"..."}
+
+# watch the worker deduct stock (structured JSON lifecycle logs)
+docker compose logs -f worker | Select-String stock_deducted
+
+# inspect the retry stairway, DLQ and message rates
+# RabbitMQ management UI -> http://localhost:15672 (guest / guest)
+
+# scale inventory workers horizontally for more concurrent deduction
+docker compose up --scale worker=2 -d
+
+# local variant: drain the worker's dead-letter queue
+python -m scripts.worker --drain-dlq
+```
+
 ## Getting Started
 
 ### Local (without Docker)
@@ -374,12 +490,15 @@ python -m scripts.consume_orders --group persistence
 
 # Optional: second consumer group to observe exchange fan-out
 python -m scripts.consume_orders --group audit
+
+# Terminal 3 — async inventory worker (Week 6: deducts stock from order.created)
+python -m scripts.worker
 ```
 
 ### With Docker Compose
 ```bash
 cp .env.example .env
-docker compose up --build        # api + consumer + db + rabbitmq + pgadmin
+docker compose up --build        # api + consumer + worker + db + rabbitmq + pgadmin
 
 # in a separate terminal, once the api/db containers are up:
 docker compose exec api alembic upgrade head
@@ -428,10 +547,11 @@ pip install -r requirements.txt
 pytest -v
 ```
 
-**102 integration tests** (all passing), organized as:
+**117 integration tests** (all passing), organized as:
 
 | Test File | Tests | Coverage |
 | --------- | ----- | -------- |
+| `tests/messaging/test_inventory_worker.py` | 15 | **Week 6 async worker:** stock deduction + idempotency log, duplicate redelivery never double-deducts, insufficient stock is retryable (transient), malformed/unknown-product/wrong-type → `PermanentMessageError` (DLQ), retry-after-restock succeeds, exponential-backoff schedule |
 | `tests/messaging/test_order_events_api.py` | 7 | **Week 5 event publishing:** exactly one `order.created` per accepted order, payload fidelity, correlation via `X-Request-ID`, no events on 422/401, fail-closed 503 without broker, serializable envelope with UTC timestamp |
 | `tests/messaging/test_order_persistence_handler.py` | 9 | Consumer-group handler: persistence correctness, idempotency under duplicate delivery, poison payloads → `PermanentMessageError` (DLQ), aggregate round-trip through the event bridge |
 | `tests/messaging/test_event_envelope.py` | 9 | Envelope serialization round-trip, unique UUIDv4 ids, strict decode rejection of malformed messages |
@@ -584,6 +704,41 @@ in `docker-compose.yml`.
   handler correctness + idempotency + poison-payload classification.
 - **Full test suite**: `pytest -v` — 102 passed, 0 failed.
 
+### Week 6 — Async Processing (Phase 2)
+- **Separate worker service** (`scripts/worker.py`, run as its own `worker`
+  container in Docker Compose alongside `api`) that consumes `order.created`
+  events on the new `orders.order-created.inventory` consumer group and
+  deducts stock asynchronously — entirely off the API request path.
+- **Async inventory deduction in the worker**: `DeductInventoryHandler`
+  (`src/contexts/inventory/services/order_event_handler.py`) loads each product
+  named in the event, applies the domain rule `product.reserve_stock(quantity)`,
+  and persists the new quantity. A new cross-context bridge
+  (`src/contexts/inventory/events.py`) validates the payload and reconstructs a
+  `StockDeductionIntent`, keeping the wire contract symmetric.
+- **Idempotency under at-least-once delivery**: handler writes one row per order
+  into the new `inventory_reservation_log` table (unique index on `order_id`) in
+  the *same transaction* that mutates stock, so a redelivered event can never
+  double-deduct — race-safe across worker replicas. New Alembic migration `0003`.
+- **DLQ + retry logic with exponential backoff**: refactored
+  `RabbitMQEventConsumer` to park failed messages in a *stairway* of per-attempt
+  durable retry queues (`<queue>.retry.1..N`) whose per-message TTL equals the
+  backoff delay (`base * 2^(n-1)`, default 1s→2s→4s→… capped at
+  `CONSUMER_BACKOFF_MAX_SECONDS`). Expired messages dead-letter back onto the
+  events exchange and re-enter the work queue. After `CONSUMER_MAX_RETRIES` the
+  message is rejected to the DLQ. Malformed envelopes/payloads and unknown
+  products are classified permanent → straight to DLQ with no retry burn;
+  insufficient stock is transient → retried, then DLQ'd.
+- **Tests for graceful malformed-message handling** — 15 new tests
+  (`tests/messaging/test_inventory_worker.py`): stock deduction + idempotency
+  log, duplicate redelivery never double-deducts, malformed/unknown-product/
+  wrong-type payloads raise `PermanentMessageError` (→ DLQ), insufficient stock
+  is retryable and atomic (no partial deduction), retry-after-restock succeeds,
+  and the exponential-backoff schedule is bounded.
+- **Docker Compose runs API and Worker together**: `worker` service starts with
+  `api`, `consumer`, `db`, and `rabbitmq`; scale inventory workers with
+  `docker compose up --scale worker=2`.
+- **Full test suite**: `pytest -v` — 117 passed, 0 failed.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -596,7 +751,7 @@ in `docker-compose.yml`.
 - [x] RabbitMQ via Docker Compose: durable exchange, queues, consumer groups, DLQ (Week 5)
 - [x] Event-driven order creation: POST /orders publishes `order.created` (202), async persistence (Week 5)
 - [x] Full event lifecycle structured logging (publish/receive/ack/nack/retry/DLQ) + 102 tests (Week 5)
-- [ ] OrderConfirmed events → Inventory stock reservation consumer (Phase 2)
+- [x] Separate async worker: inventory stock deduction with exponential-backoff retries + DLQ + 117 tests (Week 6)
 - [ ] CQRS: write-optimized DB + read-optimized store
 - [ ] Redis-backed token bucket rate limiter (from scratch)
 - [ ] OpenTelemetry distributed tracing (Jaeger/Zipkin)

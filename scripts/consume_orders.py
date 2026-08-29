@@ -132,6 +132,8 @@ async def run_consumer(group_name: str | None) -> None:
         groups,
         prefetch_count=settings.CONSUMER_PREFETCH_COUNT,
         max_retries=settings.CONSUMER_MAX_RETRIES,
+        backoff_base_seconds=settings.CONSUMER_BACKOFF_BASE_SECONDS,
+        backoff_max_seconds=settings.CONSUMER_BACKOFF_MAX_SECONDS,
     )
     await consumer.start()
     logger.info(

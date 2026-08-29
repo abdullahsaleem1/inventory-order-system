@@ -38,9 +38,15 @@ class Settings(BaseSettings):
     ORDER_CREATED_ROUTING_KEY: str = "order.created"
     ORDERS_PERSISTENCE_QUEUE: str = "orders.order-created.persistence"  # consumer group 1
     ORDERS_AUDIT_QUEUE: str = "orders.order-created.audit"              # consumer group 2
+    ORDERS_INVENTORY_QUEUE: str = "orders.order-created.inventory"      # worker group (Week 6)
     DEAD_LETTER_EXCHANGE: str = "inventory.orders.dlx"  # dead-letter topic exchange
     CONSUMER_PREFETCH_COUNT: int = 10
     CONSUMER_MAX_RETRIES: int = 3
+    # Exponential backoff for transient message failures (Week 6). On attempt
+    # `n` (1-based) the message is parked for `base * 2^(n-1)` seconds in a
+    # per-attempt retry queue before being re-delivered to the work queue.
+    CONSUMER_BACKOFF_BASE_SECONDS: float = 1.0
+    CONSUMER_BACKOFF_MAX_SECONDS: float = 60.0
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod
