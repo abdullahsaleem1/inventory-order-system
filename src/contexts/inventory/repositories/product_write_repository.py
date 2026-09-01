@@ -1,7 +1,9 @@
 """
-Inventory bounded context — repository layer.
-Only layer allowed to talk to the database. Translates ORM rows <-> domain
-entities so the service layer above never touches SQLAlchemy directly.
+Inventory bounded context — write-side repository (CQRS Week 7).
+
+The only path that adds/updates product rows. Lookup methods exist so command
+handlers can load the aggregate to apply domain rules and enforce uniqueness —
+they are write-side aggregate reads, not API query reads.
 """
 from uuid import UUID
 
@@ -12,7 +14,7 @@ from src.contexts.inventory.domain.product import Product
 from src.contexts.inventory.infrastructure.models import ProductModel
 
 
-class ProductRepository:
+class ProductWriteRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -44,20 +46,15 @@ class ProductRepository:
         row = result.scalar_one_or_none()
         return self._to_domain(row) if row else None
 
-    async def list_all(self, limit: int = 100, offset: int = 0) -> list[Product]:
-        result = await self._session.execute(select(ProductModel).limit(limit).offset(offset))
-        return [self._to_domain(row) for row in result.scalars().all()]
-
     async def add(self, entity: Product) -> Product:
-        row = self._to_model(entity)
-        self._session.add(row)
+        self._session.add(self._to_model(entity))
         await self._session.flush()
-        return self._to_domain(row)
+        return entity
 
     async def update(self, entity: Product) -> Product:
         row = await self._session.get(ProductModel, entity.id)
         if row is None:
             raise ValueError(f"Product {entity.id} not found")
-        row = self._to_model(entity, row)
+        self._to_model(entity, row)
         await self._session.flush()
-        return self._to_domain(row)
+        return entity

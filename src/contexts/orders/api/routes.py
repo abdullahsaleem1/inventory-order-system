@@ -6,6 +6,11 @@ RBAC:
    GET  /orders/{order_id}   — any authenticated user
    POST /orders/{id}/confirm — ADMIN, MANAGER
    POST /orders/{id}/cancel  — ADMIN, MANAGER, STAFF
+
+CQRS (Week 7) dependency chain: sessions -> repositories -> command/query
+handlers -> CqrsBus -> controller. Commands resolve a write session; queries
+resolve a read session (the read-optimized store when READ_DATABASE_URL is
+configured).
 """
 from uuid import UUID
 
@@ -18,23 +23,66 @@ from src.contexts.orders.api.schemas import (
     OrderCreateRequest,
     OrderResponse,
 )
+from src.contexts.orders.command_handlers import (
+    CancelOrderCommandHandler,
+    ConfirmOrderCommandHandler,
+    CreateOrderCommandHandler,
+)
+from src.contexts.orders.commands import CancelOrderCommand, ConfirmOrderCommand, CreateOrderCommand
 from src.contexts.orders.controllers.order_controller import OrderController
-from src.contexts.orders.repositories.order_repository import OrderRepository
-from src.contexts.orders.services.order_service import OrderService
+from src.contexts.orders.query_handlers import (
+    GetOrderQueryHandler,
+    ListOrdersByCustomerQueryHandler,
+)
+from src.contexts.orders.queries import GetOrderQuery, ListOrdersByCustomerQuery
+from src.contexts.orders.repositories.order_read_repository import OrderReadRepository
+from src.contexts.orders.repositories.order_write_repository import OrderWriteRepository
 from src.core.auth import get_current_user, require_roles
+from src.shared.cqrs import CqrsBus
 from src.shared.infrastructure.database import get_db_session
+from src.shared.infrastructure.read_database import get_read_db_session
 from src.shared.messaging.provider import get_event_publisher
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 def get_order_controller(
-    session: AsyncSession = Depends(get_db_session),
+    write_session: AsyncSession = Depends(get_db_session),
+    read_session: AsyncSession = Depends(get_read_db_session),
     publisher=Depends(get_event_publisher),
 ) -> OrderController:
-    repository = OrderRepository(session)
-    service = OrderService(repository)
-    return OrderController(service, publisher)
+    """Assemble the CQRS bus: write side on the write session, read side on the
+    read session. Command handlers that must keep the projection in sync use the
+    write session for BOTH repositories so they share one transaction."""
+    write_repo = OrderWriteRepository(write_session)
+    read_repo = OrderReadRepository(read_session)
+
+    bus = (
+        CqrsBus()
+        # --- write side (commands) ---
+        .register_command(CreateOrderCommand, CreateOrderCommandHandler(publisher))
+        .register_command(
+            ConfirmOrderCommand,
+            ConfirmOrderCommandHandler(
+                write_repo,
+                OrderReadRepository(write_session),  # same-transaction projection sync
+            ),
+        )
+        .register_command(
+            CancelOrderCommand,
+            CancelOrderCommandHandler(
+                write_repo,
+                OrderReadRepository(write_session),
+            ),
+        )
+        # --- read side (queries) ---
+        .register_query(GetOrderQuery, GetOrderQueryHandler(read_repo, write_repo))
+        .register_query(
+            ListOrdersByCustomerQuery,
+            ListOrdersByCustomerQueryHandler(read_repo),
+        )
+    )
+    return OrderController(bus)
 
 
 @router.post(
@@ -69,7 +117,7 @@ async def create_order(
     "/{order_id}",
     response_model=OrderResponse,
     summary="Get an order by ID",
-    description="Requires any authenticated role.",
+    description="Reads from the CQRS read model (orders_read_orders).",
     dependencies=[Depends(get_current_user)],
     responses={
         401: {"model": ErrorResponse, "description": "Missing or invalid access token"},

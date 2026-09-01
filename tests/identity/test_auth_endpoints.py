@@ -233,7 +233,9 @@ async def test_me_with_expired_token(client: AsyncClient) -> None:
 async def test_me_with_tampered_token(client: AsyncClient) -> None:
     reg = (await client.post("/auth/register", json=REGISTER_PAYLOAD)).json()
     token = reg["access_token"]
-    forged = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+    new_char = "A" if signature[0] != "A" else "B"
+    forged = f"{header}.{payload}.{new_char}{signature[1:]}"
     resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {forged}"})
     assert resp.status_code == 401
     assert_error_envelope(resp.json(), 401, "invalid_token")

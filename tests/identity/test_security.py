@@ -30,6 +30,12 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _tamper_signature(token: str) -> str:
+    header, payload, signature = token.split(".")
+    new_char = "A" if signature[0] != "A" else "B"
+    return f"{header}.{payload}.{new_char}{signature[1:]}"
+
+
 def _create_expired_token(user_id: str, email: str, role: str) -> str:
     svc = JwtTokenService(
         secret_key=settings.JWT_SECRET_KEY,
@@ -89,7 +95,7 @@ async def test_expired_token_rejected_on_auth_me(client: AsyncClient) -> None:
 async def test_tampered_token_rejected_on_inventory(client: AsyncClient) -> None:
     body = await _register(client, "inv-tamper@example.com")
     token = body["access_token"]
-    forged = token[:-1] + ("A" if token[-1] != "A" else "B")
+    forged = _tamper_signature(token)
     resp = await client.get("/inventory/products", headers=_auth(forged))
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "invalid_token"
@@ -98,7 +104,7 @@ async def test_tampered_token_rejected_on_inventory(client: AsyncClient) -> None
 async def test_tampered_token_rejected_on_orders(client: AsyncClient) -> None:
     body = await _register(client, "ord-tamper@example.com")
     token = body["access_token"]
-    forged = token[:-1] + ("A" if token[-1] != "A" else "B")
+    forged = _tamper_signature(token)
     resp = await client.get("/orders/00000000-0000-0000-0000-000000000000", headers=_auth(forged))
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "invalid_token"

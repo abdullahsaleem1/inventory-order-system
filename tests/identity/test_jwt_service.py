@@ -56,7 +56,9 @@ def test_access_token_expires_in():
 def test_tampered_signature_rejected():
     svc = make_service()
     token = svc.create_access_token(make_user())
-    forged = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+    new_char = "A" if signature[0] != "A" else "B"
+    forged = f"{header}.{payload}.{new_char}{signature[1:]}"
     with pytest.raises(InvalidTokenError):
         svc.decode_access_token(forged)
 

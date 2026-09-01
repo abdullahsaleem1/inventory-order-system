@@ -24,14 +24,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.contexts.identity.domain.errors import InvalidTokenError, TokenExpiredError
 from src.contexts.identity.domain.user import Role, User
+from src.contexts.identity.errors import InactiveUserError
 from src.contexts.identity.infrastructure.jwt_service import JwtTokenService
 from src.contexts.identity.infrastructure.password_hasher import BcryptPasswordHasher
+from src.contexts.identity.query_handlers import GetCurrentUserQueryHandler
+from src.contexts.identity.queries import GetCurrentUserQuery
 from src.contexts.identity.repositories.refresh_token_repository import (
     BlacklistedTokenRepository,
     RefreshTokenRepository,
 )
 from src.contexts.identity.repositories.user_repository import UserRepository
-from src.contexts.identity.services.auth_service import AuthService, InactiveUserError
+from src.contexts.identity.services.auth_service import AuthService
 from src.core.config import get_settings
 from src.shared.exceptions import ForbiddenError, UnauthorizedError
 from src.shared.infrastructure.database import get_db_session
@@ -63,9 +66,9 @@ async def get_current_user(
 ) -> User:
     if token is None:
         raise UnauthorizedError("Missing access token", code="UNAUTHORIZED")
-    service = _build_auth_service(session)
+    handler = GetCurrentUserQueryHandler(_build_auth_service(session))
     try:
-        return await service.get_user_from_token(token)
+        return await handler.handle(GetCurrentUserQuery(token))
     except TokenExpiredError:
         raise UnauthorizedError("Access token has expired", code="token_expired")
     except InvalidTokenError as exc:

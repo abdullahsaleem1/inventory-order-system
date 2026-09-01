@@ -24,7 +24,7 @@ from src.contexts.inventory.events import (
 from src.contexts.inventory.repositories.inventory_reservation_repository import (
     InventoryReservationRepository,
 )
-from src.contexts.inventory.repositories.product_repository import ProductRepository
+from src.contexts.inventory.repositories.product_write_repository import ProductWriteRepository
 from src.contexts.inventory.services.order_event_handler import DeductInventoryHandler
 from src.shared.infrastructure.database import Base
 from src.shared.messaging.consumer import PermanentMessageError, RabbitMQEventConsumer
@@ -36,7 +36,7 @@ PRODUCT_B = str(uuid4())
 
 async def _seed_products(session_factory, quantities: dict[str, int]) -> None:
     async with session_factory() as session:
-        repo = ProductRepository(session)
+        repo = ProductWriteRepository(session)
         for pid, qty in quantities.items():
             await repo.add(
                 Product(
@@ -84,7 +84,7 @@ async def worker_with_db():
 
 async def _set_product_qty(session_factory, product_id: str, qty: int) -> None:
     async with session_factory() as session:
-        repo = ProductRepository(session)
+        repo = ProductWriteRepository(session)
         product = await repo.get_by_id(UUID(product_id))
         product.quantity_on_hand = qty
         await repo.update(product)
@@ -93,7 +93,7 @@ async def _set_product_qty(session_factory, product_id: str, qty: int) -> None:
 
 async def _product_qty(session_factory, product_id) -> int:
     async with session_factory() as session:
-        product = await ProductRepository(session).get_by_id(UUID(product_id))
+        product = await ProductWriteRepository(session).get_by_id(UUID(product_id))
         return product.quantity_on_hand
 
 

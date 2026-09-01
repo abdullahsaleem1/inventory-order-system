@@ -22,6 +22,7 @@ from sqlalchemy.pool import StaticPool
 from src.contexts.orders.services.order_event_handler import PersistOrderCreatedHandler
 from src.main import app
 from src.shared.infrastructure.database import Base, get_db_session
+from src.shared.infrastructure.read_database import get_read_db_session
 from src.shared.messaging.provider import get_event_publisher
 from src.shared.messaging.publisher import InMemoryEventPublisher
 
@@ -48,7 +49,12 @@ async def client():
                 if session.is_active:
                     await session.commit()
 
+    async def override_get_read_db_session():
+        async with session_factory() as session:
+            yield session
+
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_read_db_session] = override_get_read_db_session
 
     # Event pipeline test double: record every event and deliver it inline to
     # the real persistence handler (simulates instant broker round-trip).
@@ -86,7 +92,12 @@ async def evented_client():
                 if session.is_active:
                     await session.commit()
 
+    async def override_get_read_db_session():
+        async with session_factory() as session:
+            yield session
+
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_read_db_session] = override_get_read_db_session
 
     publisher = InMemoryEventPublisher()
     app.dependency_overrides[get_event_publisher] = lambda: publisher
@@ -121,7 +132,12 @@ async def no_broker_client():
                 if session.is_active:
                     await session.commit()
 
+    async def override_get_read_db_session():
+        async with session_factory() as session:
+            yield session
+
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_read_db_session] = override_get_read_db_session
     app.dependency_overrides.pop(get_event_publisher, None)
 
     transport = ASGITransport(app=app)

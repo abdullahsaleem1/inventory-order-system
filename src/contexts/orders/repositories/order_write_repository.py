@@ -1,14 +1,24 @@
+"""
+Orders bounded context — write-side repository (CQRS Week 7).
+
+The write repository is the ONLY path to the normalized write tables
+(`orders_orders` / `orders_order_lines`). It is deliberately the only
+repository allowed to add, update, or delete write-model rows. Reads here exist
+only so command handlers can load an aggregate to apply domain rules on — they
+are write-side reads of the *aggregate*, not API query reads.
+"""
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import select
 
 from src.contexts.orders.domain.order import Order, OrderLine, OrderStatus
 from src.contexts.orders.infrastructure.models import OrderLineModel, OrderModel
+from src.contexts.orders.errors import OrderNotFoundError
 
 
-class OrderRepository:
+class OrderWriteRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -25,6 +35,7 @@ class OrderRepository:
         )
 
     async def get_by_id(self, order_id: UUID) -> Order | None:
+        """Load the aggregate (with its lines) for a command handler."""
         result = await self._session.execute(
             select(OrderModel).where(OrderModel.id == order_id).options(selectinload(OrderModel.lines))
         )
@@ -44,7 +55,7 @@ class OrderRepository:
     async def update_status(self, entity: Order) -> Order:
         row = await self._session.get(OrderModel, entity.id)
         if row is None:
-            raise ValueError(f"Order {entity.id} not found")
+            raise OrderNotFoundError(f"Order {entity.id} not found")
         row.status = entity.status.value
         await self._session.flush()
         return entity

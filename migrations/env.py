@@ -23,6 +23,7 @@ from src.shared.infrastructure.database import Base
 # Base.metadata. Required for autogenerate to detect them.
 from src.contexts.inventory.infrastructure import models as inventory_models  # noqa: F401
 from src.contexts.orders.infrastructure import models as orders_models  # noqa: F401
+from src.contexts.orders.infrastructure import read_models as order_read_models  # noqa: F401
 from src.contexts.identity.infrastructure import models as identity_models  # noqa: F401
 
 config = context.config

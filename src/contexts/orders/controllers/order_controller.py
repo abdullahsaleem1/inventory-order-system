@@ -1,3 +1,11 @@
+"""
+Orders bounded context — controller layer.
+
+CQRS (Week 7): the controller holds a `CqrsBus` and translates HTTP concerns
+(schema <-> response, exception mapping) only. All intent is dispatched as a
+**command** (writes) or a **query** (reads) to the bus; the controller never
+touches repositories or services directly.
+"""
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -8,24 +16,25 @@ from src.contexts.orders.api.schemas import (
     OrderLineResponse,
     OrderResponse,
 )
-from src.contexts.orders.domain.order import Order, EmptyOrderError, InvalidOrderTransitionError
-from src.contexts.orders.events import build_order_created_event
-from src.contexts.orders.services.order_service import OrderNotFoundError, OrderService
-from src.shared.exceptions import ServiceUnavailableError
-from src.shared.messaging.publisher import EventPublishError, EventPublisher
+from src.contexts.orders.commands import CancelOrderCommand, ConfirmOrderCommand, CreateOrderCommand
+from src.contexts.orders.domain.order import EmptyOrderError, InvalidOrderTransitionError, Order
+from src.contexts.orders.errors import OrderNotFoundError
+from src.contexts.orders.queries import GetOrderQuery
+from src.contexts.orders.repositories.order_read_repository import OrderReadRecord
+from src.shared.cqrs import CqrsBus
 
 
 class OrderController:
-    def __init__(self, service: OrderService, publisher: EventPublisher) -> None:
-        self._service = service
-        self._publisher = publisher
+    def __init__(self, bus: CqrsBus) -> None:
+        self._bus = bus
 
     @staticmethod
-    def _to_response(order: Order) -> OrderResponse:
+    def _to_response(order: Order | OrderReadRecord) -> OrderResponse:
+        status_str = order.status.value if isinstance(order, Order) else order.status
         return OrderResponse(
             id=order.id,
             customer_id=order.customer_id,
-            status=order.status.value,
+            status=status_str,
             lines=[
                 OrderLineResponse(
                     product_id=ln.product_id,
@@ -38,31 +47,21 @@ class OrderController:
             total_cents=order.total_cents,
         )
 
-    async def create_order(self, payload: OrderCreateRequest, *, correlation_id: str | None) -> OrderAcceptedResponse:
-        """Event-driven creation (Week 5): validate + build the aggregate, then
-        publish `order.created` — NO synchronous DB write. Persistence happens
-        asynchronously in the orders.order-created.persistence consumer group.
-        """
-        order = self._service.build_order(
-            customer_id=payload.customer_id,
-            lines=[line.model_dump() for line in payload.lines],
+    async def create_order(
+        self, payload: OrderCreateRequest, *, correlation_id: str | None
+    ) -> OrderAcceptedResponse:
+        """Command: accept a new order via the event pipeline (202)."""
+        result = await self._bus.dispatch_command(
+            CreateOrderCommand(
+                customer_id=payload.customer_id,
+                lines=[line.model_dump() for line in payload.lines],
+                correlation_id=correlation_id,
+            )
         )
-        event = build_order_created_event(order, correlation_id=correlation_id)
-        try:
-            await self._publisher.publish(event)
-        except EventPublishError as exc:
-            raise ServiceUnavailableError(
-                "Order could not be accepted: event broker did not confirm publication",
-                code="EVENT_PUBLISH_FAILED",
-            ) from exc
-        return self._to_accepted_response(order, event.event_id)
-
-    @staticmethod
-    def _to_accepted_response(order: Order, event_id: UUID) -> OrderAcceptedResponse:
         return OrderAcceptedResponse(
-            id=order.id,
-            customer_id=order.customer_id,
-            status=order.status.value,
+            id=result.order.id,
+            customer_id=result.order.customer_id,
+            status=result.order.status.value,
             lines=[
                 OrderLineResponse(
                     product_id=ln.product_id,
@@ -70,22 +69,22 @@ class OrderController:
                     unit_price_cents=ln.unit_price_cents,
                     subtotal_cents=ln.subtotal_cents,
                 )
-                for ln in order.lines
+                for ln in result.order.lines
             ],
-            total_cents=order.total_cents,
-            event_id=event_id,
+            total_cents=result.order.total_cents,
+            event_id=result.event_id,
         )
 
     async def get_order(self, order_id: UUID) -> OrderResponse:
         try:
-            order = await self._service.get_order(order_id)
+            record = await self._bus.dispatch_query(GetOrderQuery(order_id))
         except OrderNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        return self._to_response(order)
+        return self._to_response(record)
 
     async def confirm_order(self, order_id: UUID) -> OrderResponse:
         try:
-            order = await self._service.confirm_order(order_id)
+            order = await self._bus.dispatch_command(ConfirmOrderCommand(order_id))
         except OrderNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except (EmptyOrderError, InvalidOrderTransitionError) as exc:
@@ -94,7 +93,7 @@ class OrderController:
 
     async def cancel_order(self, order_id: UUID) -> OrderResponse:
         try:
-            order = await self._service.cancel_order(order_id)
+            order = await self._bus.dispatch_command(CancelOrderCommand(order_id))
         except OrderNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except InvalidOrderTransitionError as exc:

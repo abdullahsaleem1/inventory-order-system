@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     # --- Database (write model) ---
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/inventory_orders"
 
-    # --- Read store (CQRS read side) — filled in during CQRS week ---
+    # --- Read store (CQRS read side, Week 7) ---
+    # Left empty => single-database CQRS (read side shares the primary DB).
+    # Set to a dedicated read-optimized DB to serve queries from a separate store.
     READ_DATABASE_URL: str | None = None
 
     # --- Redis (rate limiting, caching) ---

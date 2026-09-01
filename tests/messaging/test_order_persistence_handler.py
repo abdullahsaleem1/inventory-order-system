@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from src.contexts.orders.events import order_from_created_event
-from src.contexts.orders.repositories.order_repository import OrderRepository
+from src.contexts.orders.repositories.order_write_repository import OrderWriteRepository
 from src.contexts.orders.services.order_event_handler import PersistOrderCreatedHandler
 from src.shared.infrastructure.database import Base
 from src.shared.messaging.consumer import PermanentMessageError
@@ -51,7 +51,13 @@ async def handler_with_db():
 
 async def _get_order(session_factory, order_id):
     async with session_factory() as session:
-        return await OrderRepository(session).get_by_id(UUID(str(order_id)))
+        return await OrderWriteRepository(session).get_by_id(UUID(str(order_id)))
+
+async def _get_read_model(session_factory, order_id):
+    from src.contexts.orders.repositories.order_read_repository import OrderReadRepository
+
+    async with session_factory() as session:
+        return await OrderReadRepository(session).get_by_id(UUID(str(order_id)))
 
 
 async def test_handler_persists_order_with_lines(handler_with_db) -> None:
@@ -67,6 +73,14 @@ async def test_handler_persists_order_with_lines(handler_with_db) -> None:
     assert order.total_cents == 3000
     assert order.status.value == "PENDING"
 
+    # CQRS read model is maintained transactionally with the write model.
+    record = await _get_read_model(session_factory, event.payload["order_id"])
+    assert record is not None
+    assert record.status == "PENDING"
+    assert record.total_cents == 3000
+    assert record.line_count == 2
+    assert len(record.lines) == 2
+
 
 async def test_duplicate_delivery_is_idempotent(handler_with_db) -> None:
     """At-least-once delivery means the same event can arrive twice; the
@@ -80,6 +94,11 @@ async def test_duplicate_delivery_is_idempotent(handler_with_db) -> None:
     order = await _get_order(session_factory, event.payload["order_id"])
     assert order is not None
     assert len(order.lines) == 2  # still exactly one persisted aggregate
+
+    # Read model also stays idempotent (no duplicate projection rows).
+    record = await _get_read_model(session_factory, event.payload["order_id"])
+    assert record is not None
+    assert record.line_count == 2
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,12 @@ from uuid import UUID, uuid4
 
 from src.contexts.identity.domain.errors import InvalidTokenError, TokenExpiredError
 from src.contexts.identity.domain.user import Role, User
+from src.contexts.identity.errors import (
+    DuplicateEmailError,
+    InactiveUserError,
+    InvalidCredentialsError,
+    InvalidPasswordError,
+)
 from src.contexts.identity.repositories.refresh_token_repository import (
     BlacklistedTokenRepository,
     RefreshTokenRepository,
@@ -15,22 +21,6 @@ from src.contexts.identity.repositories.refresh_token_repository import (
     hash_token,
 )
 from src.contexts.identity.repositories.user_repository import UserRepository
-
-
-class DuplicateEmailError(Exception):
-    pass
-
-
-class InvalidCredentialsError(Exception):
-    pass
-
-
-class InactiveUserError(Exception):
-    pass
-
-
-class InvalidPasswordError(Exception):
-    pass
 
 
 class AuthService:
@@ -186,8 +176,12 @@ class AuthService:
 
     async def logout_all(self, *, user: User) -> None:
         """Revoke ALL refresh tokens for a user — ends every session."""
+        await self.logout_all_for_user_id(user.id)
+
+    async def logout_all_for_user_id(self, *, user_id: UUID) -> None:
+        """Revoke ALL refresh tokens for a user by id (used by command handlers)."""
         if self._refresh_repo:
-            await self._refresh_repo.revoke_all_for_user(user.id)
+            await self._refresh_repo.revoke_all_for_user(user_id)
 
     # ---- access token blacklist helpers --------------------------------------
 

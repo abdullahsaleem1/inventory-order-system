@@ -5,8 +5,9 @@ Implements Domain-Driven Design, a strictly layered architecture, a **from-scrat
 OAuth2.0/JWT authorization server**, RBAC, sliding-window refresh tokens,
 **event-driven order creation over RabbitMQ** (durable topic exchange, consumer
 groups, retries + dead-lettering), **async order processing in a separate
-worker service** (inventory deduction with exponential-backoff retries), CQRS
-groundwork, and structured JSON logging — containerized with Docker Compose.
+worker service** (inventory deduction with exponential-backoff retries),
+**CQRS with a dedicated write side and a read-optimized projection**, and
+structured JSON logging — containerized with Docker Compose.
 
 ## Tech Stack
 - **Language/Framework:** Python 3.12+ (verified on 3.14), FastAPI
@@ -61,10 +62,37 @@ Route → Controller → Service → Repository → Database
 - **Repositories**: only layer allowed to touch the database; maps ORM rows to domain entities.
 - **Domain**: pure Python, framework-agnostic business rules.
 
-> Since Week 5, `POST /orders` diverges deliberately: Route → Controller →
-> Service → **EventPublisher** → RabbitMQ, with the database write performed by
-> the async persistence consumer. Every other endpoint still follows the full
-> synchronous path.
+### Command/Query Responsibility Segregation (Week 7)
+
+Since Week 7 the request flow is split into two independent paths — the
+**write side** (commands) and the **read side** (queries) — mediated by a
+lightweight in-process **CQRS bus** (`src/shared/cqrs/__init__.py`):
+
+```
+Route → Controller → CqrsBus ──► CommandHandler  → WriteRepository  → write model
+                            └──► QueryHandler    → ReadRepository   → read projection
+```
+
+- **Commands** (frozen dataclasses, named after the task: `CreateOrderCommand`,
+  `ConfirmOrderCommand`, `RegisterUserCommand`, `ReserveStockCommand`, …) change
+  state and are executed by exactly one **command handler** off the write model.
+- **Queries** (frozen dataclasses: `GetOrderQuery`, `GetProductQuery`, …) answer
+  reads and are executed by exactly one **query handler** off the read
+  projection.
+- Controllers dispatch messages to the bus and translate results/exceptions to
+  HTTP — they no longer call repositories or services directly.
+
+The order projection (`orders_read_orders`) is maintained **transactionally**
+with the write model by the persistence consumer and by the confirm/cancel
+command handlers, so the read side is ready-consistent in single-database mode
+and eventually consistent when `READ_DATABASE_URL` is configured to a separate
+store. See **CQRS Architecture & Tradeoffs** below for the full decision record.
+
+> Prior note (kept for history): since Week 5, `POST /orders` diverged
+> deliberately — Route → Controller → Service → **EventPublisher** → RabbitMQ —
+> with the DB write performed by the async persistence consumer. In Week 7 that
+> path was re-expressed as the `CreateOrderCommand` **command**, dispatched through
+> the CQRS bus.
 
 ### Standardized Error Responses
 Every error — from auth endpoints and every other endpoint — is serialized by
@@ -468,6 +496,105 @@ docker compose up --scale worker=2 -d
 python -m scripts.worker --drain-dlq
 ```
 
+## CQRS Architecture & Tradeoffs (Week 7)
+
+### What was built
+The codebase was fully refactored so that **every** use case is now expressed
+as either a **Command** (write) or a **Query** (read), dispatched through a
+lightweight in-process mediator — the **CqrsBus** (`src/shared/cqrs/__init__.py`).
+
+- **Command / Query message types** — frozen dataclasses per context:
+  `src/contexts/{orders,inventory,identity}/{commands,queries}.py`
+  (`CreateOrderCommand`, `ConfirmOrderCommand`, `CancelOrderCommand`,
+  `CreateProductCommand`, `ReserveStockCommand`, `RestockCommand`,
+  `LoginCommand`, `RegisterUserCommand`, `RefreshTokensCommand`; and
+  `GetOrderQuery`, `ListOrdersByCustomerQuery`, `GetProductQuery`,
+  `GetCurrentUserQuery`).
+- **Command handlers** (write side) — one class per command, operating on a
+  *write repository*:
+  `src/contexts/{orders,inventory,identity}/command_handlers.py`.
+- **Query handlers** (read side) — one class per query, reading from a *read
+  repository*: `src/contexts/{orders,inventory,identity}/query_handlers.py`.
+- **Split repositories** — each context now has a write repository (the only
+  path that mutates the normalized tables) and a read repository (the only path
+  API queries use). E.g. `OrderWriteRepository` / `OrderReadRepository`,
+  `ProductWriteRepository` / `ProductReadRepository`.
+- **A read-optimized projection** — `orders_read_orders`
+  (`src/contexts/orders/infrastructure/read_models.py`): one denormalized row
+  per order with line items stored inline as JSON, a materialized `total_cents`
+  and `line_count`, and a `customer_id` index to serve "all orders for customer
+  X" without a join or aggregate. Created in migration `0004`.
+- **A write-optimized write table** — migration `0004` also **drops the
+  `customer_id` index from the write table** `orders_orders`: that index served
+  only reads (which now go to the projection) and slowed every `INSERT` with
+  by-maintenance writes.
+- **Projection maintenance** — `PersistOrderCreatedHandler` writes the aggregate
+  AND upserts the read projection in the **same transaction**; the
+  `ConfirmOrderCommandHandler` / `CancelOrderCommandHandler` keep the
+  projection's `status` in sync in the same transaction as the write-model
+  update.
+- **Read-database plumbing** — `src/shared/infrastructure/read_database.py`
+  exposes `get_read_db_session()`. When `READ_DATABASE_URL` is empty (default)
+  the read side shares the primary DB (single-database CQRS); when set, read
+  queries resolve against a dedicated read-optimized store.
+
+### Structural layout (per context)
+```
+orders/
+├── commands.py          # frozen write-side message types
+├── queries.py           # frozen read-side message types
+├── command_handlers.py  # one handler per command (write side)
+├── query_handlers.py    # one handler per query   (read side)
+├── repositories/
+│   ├── order_write_repository.py   # normalized write tables only
+│   └── order_read_repository.py    # orders_read_orders projection only
+└── infrastructure/read_models.py   # denormalized read model
+```
+
+### The CQRS bus
+`CqrsBus.register_command(type, handler)` / `register_query(type, handler)` bind
+a concrete message type to a handler instance (or bare callable).
+`dispatch_command(...)` / `dispatch_query(...)` resolve by message type and
+raise `CqrsMessageError` if no handler is registered. Handlers are wired in the
+routes' dependency-injection chain, so the bus is assembled fresh per request
+with the correct write/read sessions.
+
+```
+# src/contexts/orders/api/routes.py
+bus = (CqrsBus()
+    .register_command(CreateOrderCommand, CreateOrderCommandHandler(publisher))
+    .register_command(ConfirmOrderCommand, ConfirmOrderCommandHandler(write_repo, read_repo))
+    .register_query(GetOrderQuery, GetOrderQueryHandler(read_repo, write_repo))
+    ...)
+return OrderController(bus)
+```
+
+### Configuring a dedicated read store
+Set `READ_DATABASE_URL` to a separate database (or logical schema). The only
+table the read side needs is `orders_read_orders` (and, for the inventory read
+side, the product read table). Each read-optimized store can then be sized,
+indexed, and even replicated independently of the write database.
+
+### Tradeoffs & decision record
+| Tradeoff | Where we landed | Why |
+| -------- | --------------- | --- |
+| **Command vs Query separation** | Explicit types + handlers + repositories | Clearer intent, independent testing, each side can evolve its schema/storage freely. |
+| **Which store reads hit** | Read repositories read ONLY the projections; write tables have only write-friendly indexes | Keeps hot read queries off the write path; removes per-write index overhead. |
+| **Eventual vs strong consistency** | Create path is *transactionally* consistent (same txn writes model + projection); confirm/cancel keep them in sync in-txn. With a separate read store, reads are eventually consistent. | Most CQRS systems accept eventual consistency for reads; we keep the create path strong for simplicity. |
+| **Scope** | Single-database CQRS by default; separate read store opt-in via `READ_DATABASE_URL` | Works out of the box, matches the test setup, and scales up when a real read replica is warranted. |
+| **The CQRS bus is in-process, not a message bus** | No serialization or distributed dispatch | This is a monolith; distributed command/query dispatch over a broker would add latency and complexity without benefit here. The event pipeline (RabbitMQ) still handles the async cross-context decoupling. |
+| **Inventory read side** | Shares the product table with the write side for now | Inventory reads are single-row gets; a projection would add no latency win until inventory is read-heavy or needs a denormalized shape. The repository split is in place so a projection can replace it later. |
+| **Complexity** | A mediator, message types, and two repositories per context | Acceptable for the correctness/readability gains; a lighter "just split the service" approach would blur the write/read boundary we wanted to enforce. |
+
+### Why this is the right shape for this system
+The system is write-heavy on ingestion (`POST /orders` is event-driven and
+returns 202 immediately) and read-heavy on queries (per-customer order list,
+product listings). A write-optimized write table + a denormalized, indexed read
+projection lets each side be tuned independently, and the in-process bus keeps
+the bounded contexts decoupled without adding a second broker. This directly
+fulfils the brief's "highly optimized for fast insertions" goal by removing
+unnecessary read indexes from the write database.
+
 ## Getting Started
 
 ### Local (without Docker)
@@ -527,7 +654,9 @@ Seeds 60 realistic products and 12 users (2 ADMIN, 3 MANAGER, 3 STAFF,
 
 ### Database Migrations
 Migrations live in `migrations/versions/`, managed by Alembic and targeting
-the app's own `DATABASE_URL` from `.env`.
+the app's own `DATABASE_URL` from `.env`. Migration `0004` (Week 7) adds the
+CQRS read projection `orders_read_orders` and drops the now-unneeded
+`customer_id` index from the write table `orders_orders`.
 ```bash
 alembic upgrade head                              # apply all migrations
 alembic revision --autogenerate -m "add X table"  # generate a new migration
@@ -547,13 +676,15 @@ pip install -r requirements.txt
 pytest -v
 ```
 
-**117 integration tests** (all passing), organized as:
+**127 integration tests** (all passing), organized as:
 
 | Test File | Tests | Coverage |
 | --------- | ----- | -------- |
+| `tests/orders/test_order_read_model.py` | 5 | **Week 7 CQRS read side:** GET resolves via query handler off `orders_read_orders`, confirm/cancel commands keep the projection status in sync, by-customer listing reads the customer_id-indexed projection only, isolation per customer |
+| `tests/messaging/test_cqrs_bus.py` | 5 | **Week 7 CQRS bus:** command/query handler invocation (instance + callable), unregistered dispatch raises `CqrsMessageError`, registration is per concrete type |
 | `tests/messaging/test_inventory_worker.py` | 15 | **Week 6 async worker:** stock deduction + idempotency log, duplicate redelivery never double-deducts, insufficient stock is retryable (transient), malformed/unknown-product/wrong-type → `PermanentMessageError` (DLQ), retry-after-restock succeeds, exponential-backoff schedule |
 | `tests/messaging/test_order_events_api.py` | 7 | **Week 5 event publishing:** exactly one `order.created` per accepted order, payload fidelity, correlation via `X-Request-ID`, no events on 422/401, fail-closed 503 without broker, serializable envelope with UTC timestamp |
-| `tests/messaging/test_order_persistence_handler.py` | 9 | Consumer-group handler: persistence correctness, idempotency under duplicate delivery, poison payloads → `PermanentMessageError` (DLQ), aggregate round-trip through the event bridge |
+| `tests/messaging/test_order_persistence_handler.py` | 10 | Consumer-group handler: persistence correctness + read-projection maintenance, idempotency under duplicate delivery (projection too), poison payloads → `PermanentMessageError` (DLQ), aggregate round-trip through the event bridge |
 | `tests/messaging/test_event_envelope.py` | 9 | Envelope serialization round-trip, unique UUIDv4 ids, strict decode rejection of malformed messages |
 | `tests/messaging/test_inmemory_publisher.py` | 4 | Publisher test double: ordered recording, inline subscribers, outage-like failure propagation |
 | `tests/identity/test_auth_endpoints.py` | 15 | Register, login, OAuth2 token, /auth/me, expired/tampered tokens, error envelope |
@@ -564,13 +695,14 @@ pytest -v
 | `tests/identity/test_password_hasher.py` | 3 | bcrypt hashing, salt, verify |
 | `tests/identity/test_jwt_service.py` | 2 | JWT signing, expiry, tamper/signature/audience rejection |
 
-Integration tests run against an **in-memory SQLite** DB injected via a
-`get_db_session` dependency override — no PostgreSQL required. The broker is
-substituted by an `InMemoryEventPublisher` dependency override that also
-forwards events inline to the real persistence handler, so the full
-publish → consume → persist path is exercised deterministically with **no
-RabbitMQ container needed**. The RabbitMQ client (`aio-pika`) itself is only
-touched in Docker Compose / local-broker runs.
+Integration tests run against an **in-memory SQLite** DB injected via
+`get_db_session` (write side) and `get_read_db_session` (read side) dependency
+overrides — no PostgreSQL required. The broker is substituted by an
+`InMemoryEventPublisher` dependency override that also forwards events inline
+to the real persistence handler, so the full publish → consume → persist →
+read-projection path is exercised deterministically with **no RabbitMQ
+container needed**. The RabbitMQ client (`aio-pika`) itself is only touched in
+Docker Compose / local-broker runs.
 
 ## Weekly Progress Log
 
@@ -739,6 +871,50 @@ in `docker-compose.yml`.
   `docker compose up --scale worker=2`.
 - **Full test suite**: `pytest -v` — 117 passed, 0 failed.
 
+### Week 7 — CQRS (Phase 3: Write Side)
+- **Command/Query segregation across every context** — added a lightweight
+  in-process **CQRS bus** (`src/shared/cqrs/`) that dispatches frozen
+  `Command`/`Query` dataclasses to exactly one registered handler. All three
+  bounded contexts were refactored: `orders`, `inventory`, and `identity` each
+  gained `commands.py`, `queries.py`, `command_handlers.py`, and
+  `query_handlers.py`.
+- **Split repositories** — each context now has a separate **write repository**
+  (the only path that mutates the normalized tables) and a **read repository**
+  (the only path API queries use): `OrderWriteRepository`/`OrderReadRepository`,
+  `ProductWriteRepository`/`ProductReadRepository`. The former single
+  `OrderRepository`/`ProductRepository`/`ProductService`/`OrderService` were
+  removed.
+- **Read-optimized projection** — `orders_read_orders`
+  (`src/contexts/orders/infrastructure/read_models.py`): one denormalized row
+  per order with line items stored inline as JSON, materialized `total_cents`
+  and `line_count`, and a `customer_id` index serving per-customer listing
+  without a join. New Alembic migration `0004`.
+- **Write-optimized write DB** — migration `0004` also **drops the
+  `customer_id` index from `orders_orders`**: reads now hit the projection, so
+  the write table keeps no read-only index overhead on every INSERT.
+- **Read-database plumbing** — `get_read_db_session()` in
+  `src/shared/infrastructure/read_database.py`. Default is single-database CQRS
+  (as in tests); set `READ_DATABASE_URL` to point the read side at a dedicated
+  read-optimized store.
+- **Consistent projection** — `PersistOrderCreatedHandler` writes the model and
+  upserts the projection in the same transaction; confirm/cancel command
+  handlers keep the projection's `status` in sync in-transaction.
+- **Docs** — new **CQRS Architecture & Tradeoffs** section above records the
+  decision, the write/read split per context, how to configure a separate read
+  store, and the tradeoffs (eventual vs strong consistency, in-process bus vs a
+  message bus, inventory sharing the product table).
+- **Tests refactored to the CQRS structure** — existing tests now use the
+  write/read repositories; added `tests/orders/test_order_read_model.py` (5) and
+  `tests/messaging/test_cqrs_bus.py` (5); the persistence-handler test asserts
+  the read projection is maintained transactionally.
+- **Stabilized a pre-existing flaky JWT tamper test** — the tampered-token tests
+  mutated only the *last* base64 character of a JWT signature (occasionally a
+  no-op, so they intermittently failed). They now flip the *first* signature
+  character via a shared tamper helper in `test_security.py`,
+  `test_auth_endpoints.py`, and `test_jwt_service.py`, making signature
+  tampering deterministic.
+- **Full test suite**: `pytest -v` — 127 passed, 0 failed.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -752,7 +928,7 @@ in `docker-compose.yml`.
 - [x] Event-driven order creation: POST /orders publishes `order.created` (202), async persistence (Week 5)
 - [x] Full event lifecycle structured logging (publish/receive/ack/nack/retry/DLQ) + 102 tests (Week 5)
 - [x] Separate async worker: inventory stock deduction with exponential-backoff retries + DLQ + 117 tests (Week 6)
-- [ ] CQRS: write-optimized DB + read-optimized store
+- [x] CQRS: write side (commands) / read side (queries) split via in-process CqrsBus, write-optimized write DB + read-optimized projection `orders_read_orders` + 127 tests (Week 7)
 - [ ] Redis-backed token bucket rate limiter (from scratch)
 - [ ] OpenTelemetry distributed tracing (Jaeger/Zipkin)
 - [ ] Chaos engineering resilience tests

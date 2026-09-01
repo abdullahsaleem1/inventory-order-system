@@ -28,6 +28,20 @@ from src.contexts.identity.api.schemas import (
     TokenResponse,
     UserResponse,
 )
+from src.contexts.identity.command_handlers import (
+    LoginCommandHandler,
+    LogoutAllCommandHandler,
+    LogoutCommandHandler,
+    RefreshTokensCommandHandler,
+    RegisterUserCommandHandler,
+)
+from src.contexts.identity.commands import (
+    LoginCommand,
+    LogoutAllCommand,
+    LogoutCommand,
+    RefreshTokensCommand,
+    RegisterUserCommand,
+)
 from src.contexts.identity.controllers.auth_controller import AuthController
 from src.contexts.identity.infrastructure.jwt_service import JwtTokenService
 from src.contexts.identity.infrastructure.password_hasher import BcryptPasswordHasher
@@ -35,6 +49,8 @@ from src.contexts.identity.infrastructure.models import (
     BlacklistedTokenModel,
     RefreshTokenModel,
 )
+from src.contexts.identity.query_handlers import GetCurrentUserQueryHandler, GetUserQueryHandler
+from src.contexts.identity.queries import GetCurrentUserQuery, GetUserQuery
 from src.contexts.identity.repositories.refresh_token_repository import (
     BlacklistedTokenRepository,
     RefreshTokenRepository,
@@ -42,6 +58,7 @@ from src.contexts.identity.repositories.refresh_token_repository import (
 from src.contexts.identity.repositories.user_repository import UserRepository
 from src.contexts.identity.services.auth_service import AuthService
 from src.core.config import get_settings
+from src.shared.cqrs import CqrsBus
 from src.shared.infrastructure.database import get_db_session
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -55,7 +72,7 @@ settings = get_settings()
 
 
 def get_auth_controller(session: AsyncSession = Depends(get_db_session)) -> AuthController:
-    repository = UserRepository(session)
+    user_repo = UserRepository(session)
     hasher = BcryptPasswordHasher()
     tokens = JwtTokenService(
         secret_key=settings.JWT_SECRET_KEY,
@@ -65,15 +82,26 @@ def get_auth_controller(session: AsyncSession = Depends(get_db_session)) -> Auth
         access_token_expire_minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
         refresh_token_expire_days=settings.REFRESH_TOKEN_EXPIRE_DAYS,
     )
-    return AuthController(
-        AuthService(
-            repository,
-            hasher,
-            tokens,
-            refresh_token_repo=RefreshTokenRepository(session),
-            blocklist_repo=BlacklistedTokenRepository(session),
-        )
+    auth_service = AuthService(
+        user_repo,
+        hasher,
+        tokens,
+        refresh_token_repo=RefreshTokenRepository(session),
+        blocklist_repo=BlacklistedTokenRepository(session),
     )
+    bus = (
+        CqrsBus()
+        # --- write side (commands) ---
+        .register_command(RegisterUserCommand, RegisterUserCommandHandler(auth_service))
+        .register_command(LoginCommand, LoginCommandHandler(auth_service))
+        .register_command(RefreshTokensCommand, RefreshTokensCommandHandler(auth_service))
+        .register_command(LogoutCommand, LogoutCommandHandler(auth_service))
+        .register_command(LogoutAllCommand, LogoutAllCommandHandler(auth_service))
+        # --- read side (queries) ---
+        .register_query(GetCurrentUserQuery, GetCurrentUserQueryHandler(auth_service))
+        .register_query(GetUserQuery, GetUserQueryHandler(user_repo))
+    )
+    return AuthController(bus)
 
 
 # ---- registration -----------------------------------------------------------

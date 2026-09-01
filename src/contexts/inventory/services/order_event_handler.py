@@ -27,7 +27,7 @@ from src.contexts.inventory.events import StockDeductionIntent, deduction_intent
 from src.contexts.inventory.repositories.inventory_reservation_repository import (
     InventoryReservationRepository,
 )
-from src.contexts.inventory.repositories.product_repository import ProductRepository
+from src.contexts.inventory.repositories.product_write_repository import ProductWriteRepository
 from src.shared.messaging.consumer import PermanentMessageError
 
 logger = logging.getLogger("inventory.worker_handler")
@@ -41,7 +41,7 @@ class DeductInventoryHandler:
         intent: StockDeductionIntent = deduction_intent_from_created_event(event)
 
         async with self._session_factory() as session:
-            product_repo = ProductRepository(session)
+            product_repo = ProductWriteRepository(session)
             reservation_repo = InventoryReservationRepository(session)
 
             if await reservation_repo.exists(intent.order_id):

@@ -1,7 +1,8 @@
 """
 Inventory bounded context — routes layer.
-Thin wiring only: defines HTTP endpoints and delegates immediately to the
-controller. No business logic, no persistence logic here.
+
+Thin wiring only: defines HTTP endpoints and assembles the CQRS bus. No
+business logic, no persistence logic here.
 
 RBAC:
   POST   /inventory/products           — ADMIN, MANAGER
@@ -21,20 +22,48 @@ from src.contexts.inventory.api.schemas import (
     ProductResponse,
     StockAdjustmentRequest,
 )
+from src.contexts.inventory.command_handlers import (
+    CreateProductCommandHandler,
+    ReserveStockCommandHandler,
+    RestockCommandHandler,
+)
+from src.contexts.inventory.commands import CreateProductCommand, ReserveStockCommand, RestockCommand
 from src.contexts.inventory.controllers.product_controller import ProductController
-from src.contexts.inventory.repositories.product_repository import ProductRepository
-from src.contexts.inventory.services.product_service import ProductService
+from src.contexts.inventory.query_handlers import (
+    GetProductQueryHandler,
+    ListProductsQueryHandler,
+)
+from src.contexts.inventory.queries import GetProductQuery, ListProductsQuery
+from src.contexts.inventory.repositories.product_read_repository import ProductReadRepository
+from src.contexts.inventory.repositories.product_write_repository import ProductWriteRepository
 from src.core.auth import get_current_user, require_roles
+from src.shared.cqrs import CqrsBus
 from src.shared.infrastructure.database import get_db_session
+from src.shared.infrastructure.read_database import get_read_db_session
 
 router = APIRouter(prefix="/inventory/products", tags=["Inventory"])
 
 
-def get_product_controller(session: AsyncSession = Depends(get_db_session)) -> ProductController:
-    """Dependency-injection chain: session -> repository -> service -> controller."""
-    repository = ProductRepository(session)
-    service = ProductService(repository)
-    return ProductController(service)
+def get_product_controller(
+    write_session: AsyncSession = Depends(get_db_session),
+    read_session: AsyncSession = Depends(get_read_db_session),
+) -> ProductController:
+    """Dependency chain: sessions -> repositories -> command/query handlers ->
+    CqrsBus -> controller."""
+    write_repo = ProductWriteRepository(write_session)
+    read_repo = ProductReadRepository(read_session)
+
+    bus = (
+        CqrsBus()
+        # --- write side (commands) ---
+        .register_command(CreateProductCommand, CreateProductCommandHandler(write_repo))
+        .register_command(ReserveStockCommand, ReserveStockCommandHandler(write_repo))
+        .register_command(RestockCommand, RestockCommandHandler(write_repo))
+        # --- read side (queries) ---
+        .register_query(GetProductQuery, GetProductQueryHandler(read_repo))
+        .register_query(ListProductsQuery, ListProductsQueryHandler(read_repo))
+    )
+    return ProductController(bus)
 
 
 @router.post(

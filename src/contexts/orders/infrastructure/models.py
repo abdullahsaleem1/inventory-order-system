@@ -10,7 +10,10 @@ class OrderModel(Base):
     __tablename__ = "orders_orders"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    customer_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    # Write-optimized (CQRS Week 7): the customer_id index was moved to the
+    # read model (orders_read_orders). By-customer lookups go through the read
+    # side; the write table keeps only what insert/status paths need.
+    customer_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
 
     lines: Mapped[list["OrderLineModel"]] = relationship(back_populates="order", cascade="all, delete-orphan")

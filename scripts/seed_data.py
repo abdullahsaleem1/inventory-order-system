@@ -28,7 +28,7 @@ from src.contexts.identity.infrastructure.password_hasher import BcryptPasswordH
 from src.contexts.identity.repositories.user_repository import UserRepository
 from src.contexts.inventory.domain.product import Product
 from src.contexts.inventory.infrastructure.models import ProductModel
-from src.contexts.inventory.repositories.product_repository import ProductRepository
+from src.contexts.inventory.repositories.product_write_repository import ProductWriteRepository
 from src.core.logging_config import configure_logging, get_logger
 from src.shared.infrastructure.database import AsyncSessionLocal
 
@@ -60,7 +60,7 @@ def _generate_sku(category: str, index: int) -> str:
 
 
 async def seed_products(session, count: int = 60) -> int:
-    repo = ProductRepository(session)
+    repo = ProductWriteRepository(session)
     created = 0
     for i in range(1, count + 1):
         category = random.choice(PRODUCT_CATEGORIES)
