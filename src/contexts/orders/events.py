@@ -36,6 +36,24 @@ def build_order_created_event(order: Order, *, correlation_id: str | None = None
     )
 
 
+def build_order_status_changed_event(
+    order: Order, *, correlation_id: str | None = None
+) -> DomainEvent:
+    """Serialize a post-transition Order into an `order.status.changed` event.
+
+    Consumed by the Week 8 read-projector sync worker to keep the dedicated
+    read store's `status` field eventually consistent with the write model.
+    """
+    return DomainEvent(
+        event_type=EventTypes.ORDER_STATUS_CHANGED,
+        correlation_id=correlation_id,
+        payload={
+            "order_id": str(order.id),
+            "status": order.status.value,
+        },
+    )
+
+
 def _require_str(payload: dict, key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str):

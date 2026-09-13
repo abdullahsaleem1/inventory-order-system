@@ -595,6 +595,116 @@ the bounded contexts decoupled without adding a second broker. This directly
 fulfils the brief's "highly optimized for fast insertions" goal by removing
 unnecessary read indexes from the write database.
 
+## CQRS Read Phase — Dedicated Read Store (Week 8)
+
+Week 7 shipped the read projection *inside* the same database. Week 8 removes
+reading from the database entirely **for orders**: query handlers now answer
+**exclusively** from a dedicated read store that lives **outside** the write
+database, is written **only** by a background sync worker, and is therefore
+*eventually* consistent with the write model.
+
+### What was built
+- **Dedicated read store** behind a single `OrderReadStore` interface
+  (`src/shared/readstore/`):
+  - `InMemoryOrderReadStore` — the zero-dependency default (dev + tests).
+  - `ElasticsearchOrderReadStore` — the deployment-backed store; compose runs
+    an `elasticsearch` service and points the API / sync worker at it via
+    `READ_STORE_TYPE=elasticsearch`, `READ_STORE_URL=http://elasticsearch:9200`.
+  - `build_read_store()` / `get_read_store()` factory wired through FastAPI DI
+    (built at startup, closed at shutdown).
+- **Sync worker (read projector)** — `scripts/read_projector.py` runs a third
+  consumer group (`read`, queue `orders.order-created.read`) bound to
+  `order.created` and `order.status.changed`. Its handler
+  (`ProjectOrderToReadStoreHandler` in
+  `src/contexts/orders/services/read_model_projector.py`) is the **only**
+  writer of the read store. It is idempotent (at-least-once safe) and classifies
+  unhandled event types / malformed payloads as `PermanentMessageError` → DLQ.
+- **New event type `order.status.changed`** — confirm/cancel command handlers
+  publish it *before* the DB commit (a publish failure fails the command and
+  rolls the write back), so the write model and the read store transition
+  independently and the read side can lag-and-converge.
+- **Query handlers read only the read store** — the Week-7 fallback to the
+  cached projection table was **removed**: `GetOrderQueryHandler` and
+  `ListOrdersQueryHandler` go through `OrderReadStoreRepository` →
+  `OrderReadStore` and nowhere else. The Week-7 `orders_read_orders` projection
+  is still maintained transactionally for the write path and week-7 tests, but
+  queries no longer touch it.
+
+### Document shape
+Each projection is a plain JSON document (no joins, no DB), shared verbatim by
+the in-memory and Elasticsearch stores and the repository mapping:
+
+```json
+{ "order_id": "…", "customer_id": "…", "status": "PENDING",
+  "total_cents": 3000, "line_count": 2,
+  "items": [{ "product_id": "…", "quantity": 2, "unit_price_cents": 1500, "subtotal_cents": 3000 }],
+  "created_at": "…", "updated_at": "…" }
+```
+
+### Eventual consistency, on purpose
+- Writes **commit** when `POST /orders` / confirm / cancel returns.
+- The read store catches up when the sync worker consumes the event.
+- A query between those two instants returns **404** for `GET /orders/{id}` and
+  simply omits the order from a list — the query path **never falls back** to
+  the write model, so the read store is the single source of truth for reads.
+- Status transitions flow as events: a `GET` served before the read store
+  applies them shows the stale status, then converges (verified by
+  `tests/orders/test_read_store_consistency.py`, including the
+  out-of-order/no-prior-document safety case).
+
+### Read latency (measured)
+`python -m scripts.benchmark_reads --orders 5000 --iterations 1000` seeds
+5,000 orders, then times each read strategy this project has evolved through.
+The Week-8 row uses the in-memory backend (no Docker available on the
+benchmark machine); the same script takes `--es-url` to measure the
+Elasticsearch store compose brings up.
+
+| Read strategy | mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) |
+| ------------- | --------- | -------- | -------- | -------- |
+| GET /orders/{id} (write-engine join - pre-CQRS) | 4.4889 | 4.1726 | 6.4527 | 7.8258 |
+| GET /orders/{id} (Week-7 projection, one table) | 1.6793 | 1.5555 | 2.4256 | 2.9711 |
+| GET /orders/{id} (Week-8 dedicated read store) | 0.0275 | 0.0227 | 0.0573 | 0.0812 |
+| List by customer (write-engine full scan - pre-CQRS) | 115.6851 | 104.0222 | 176.2422 | 223.0320 |
+| List by customer (Week-7 projection index) | 1.8400 | 1.6220 | 3.0569 | 4.1004 |
+| List by customer (Week-8 dedicated read store) | 0.8244 | 0.6149 | 1.7695 | 2.7097 |
+
+Analysis:
+- **GET by id ≈ 163× faster** than the normalized write-engine join and ≈ 61×
+  faster than the Week-7 single-table projection.
+- **List by customer ≈ 140× faster** than the pre-CQRS full scan (the write
+  table deliberately has no `customer_id` index) and ≈ 2.2× faster than the
+  Week-7 indexed projection.
+- The measured Week-8 number is the query-handler fetch cost only — 5,000
+  documents served from a dict-backed store. The Elasticsearch store adds
+  network + Lucene cost but keeps reads entirely off the write DB and is
+  horizontally replicable. The cost of *keeping the store current* is the
+  event→projection transition (≈µs in-memory; bounded by the broker in prod),
+  which is exactly the eventual-consistency window the tests measure.
+
+### Week 8 decision record
+| Decision | Week 7 | Week 8 |
+| -------- | ------ | ------ |
+| Where queries read | `orders_read_orders` table | `OrderReadStore` (ES in compose, in-memory in dev/test) |
+| Written by | write handlers, in the same transaction | sync worker (consumer group `read`) |
+| Read consistency | strong | eventual (404 until projected) |
+| Optimized for | zero extra infrastructure | reads that replicate/scale independently of the write DB |
+| Store stays current via | transaction commit | `order.created` + `order.status.changed` events |
+
+### Running it
+```bash
+# Docker Compose (recommended): adds elasticsearch + readprojector services
+docker compose up --build
+
+# Pure local: the in-memory read store needs nothing started; run the sync
+# worker (consumer group "read") to keep the store current:
+python -m scripts.read_projector
+
+# Benchmark the read strategies (numbers above):
+python -m scripts.benchmark_reads --orders 5000 --iterations 1000
+# Same workload against the compose Elasticsearch store:
+python -m scripts.benchmark_reads --orders 5000 --iterations 1000 --es-url http://localhost:9200
+```
+
 ## Getting Started
 
 ### Local (without Docker)
@@ -620,12 +730,21 @@ python -m scripts.consume_orders --group audit
 
 # Terminal 3 — async inventory worker (Week 6: deducts stock from order.created)
 python -m scripts.worker
+
+# Terminal 4 — async READ PROJECTOR (Week 8: keeps the dedicated read store
+# current; without it, orders are 404 until a projector catches up). Uses the
+# in-memory read store here; READ_STORE_TYPE=elasticsearch points it at ES.
+python -m scripts.read_projector
 ```
 
 ### With Docker Compose
 ```bash
 cp .env.example .env
-docker compose up --build        # api + consumer + worker + db + rabbitmq + pgadmin
+docker compose up --build
+# services: api + consumer + worker + readprojector + db + elasticsearch
+#                     + rabbitmq + pgadmin
+# API runs with READ_STORE_TYPE=elasticsearch; the readprojector consumer
+# group fills the Elasticsearch index from order.created / order.status.changed
 
 # in a separate terminal, once the api/db containers are up:
 docker compose exec api alembic upgrade head
@@ -676,10 +795,12 @@ pip install -r requirements.txt
 pytest -v
 ```
 
-**127 integration tests** (all passing), organized as:
+**140 integration tests** (all passing), organized as:
 
 | Test File | Tests | Coverage |
 | --------- | ----- | -------- |
+| `tests/orders/test_read_store_consistency.py` | 6 | **Week 8 eventual consistency:** 404 until the read projector applies `order.created`; convergence when the sync worker processes the event; confirm/cancel status lag then convergence via `order.status.changed`; cancel-before-projection (out-of-order) safety; idempotent projection under at-least-once replay; projection matches the write model |
+| `tests/orders/test_read_projector.py` | 7 | **Week 8 sync-worker handler:** full projection from `order.created`; status-only update from `order.status.changed`; duplicate delivery is idempotent; unsupported event types / malformed payloads → `PermanentMessageError` (DLQ); store↔record round-trip; status update on a missing document is a safe no-op |
 | `tests/orders/test_order_read_model.py` | 5 | **Week 7 CQRS read side:** GET resolves via query handler off `orders_read_orders`, confirm/cancel commands keep the projection status in sync, by-customer listing reads the customer_id-indexed projection only, isolation per customer |
 | `tests/messaging/test_cqrs_bus.py` | 5 | **Week 7 CQRS bus:** command/query handler invocation (instance + callable), unregistered dispatch raises `CqrsMessageError`, registration is per concrete type |
 | `tests/messaging/test_inventory_worker.py` | 15 | **Week 6 async worker:** stock deduction + idempotency log, duplicate redelivery never double-deducts, insufficient stock is retryable (transient), malformed/unknown-product/wrong-type → `PermanentMessageError` (DLQ), retry-after-restock succeeds, exponential-backoff schedule |
@@ -698,11 +819,15 @@ pytest -v
 Integration tests run against an **in-memory SQLite** DB injected via
 `get_db_session` (write side) and `get_read_db_session` (read side) dependency
 overrides — no PostgreSQL required. The broker is substituted by an
-`InMemoryEventPublisher` dependency override that also forwards events inline
-to the real persistence handler, so the full publish → consume → persist →
-read-projection path is exercised deterministically with **no RabbitMQ
-container needed**. The RabbitMQ client (`aio-pika`) itself is only touched in
-Docker Compose / local-broker runs.
+`InMemoryEventPublisher` dependency override that forwards events inline to the
+real handlers, each filtered by its queue's routing-key bindings, so the full
+publish → consume → persist → read-projection → **read-store projection** path
+is exercised deterministically with **no RabbitMQ container needed**. Order
+query handlers read a fresh `InMemoryOrderReadStore` (injected via the
+`get_read_store` override), and tests that specialize in eventual consistency
+drive the read projector themselves to prove lag-and-converge. The RabbitMQ
+client (`aio-pika`) itself is only touched in Docker Compose / local-broker
+runs.
 
 ## Weekly Progress Log
 
@@ -915,6 +1040,41 @@ in `docker-compose.yml`.
   tampering deterministic.
 - **Full test suite**: `pytest -v` — 127 passed, 0 failed.
 
+### Week 8 — CQRS (Phase 3: Read Side)
+- **Dedicated read store outside the write DB** — `OrderReadStore` interface
+  with `InMemoryOrderReadStore` (zero-dependency dev/test default) and
+  `ElasticsearchOrderReadStore` (compose-backed, `READ_STORE_TYPE=elasticsearch`);
+  factory wired through FastAPI DI and closed at shutdown.
+- **Sync worker (read projector)** — new consumer group (`read`, queue
+  `orders.order-created.read`) bound to `order.created` and
+  `order.status.changed`; `ProjectOrderToReadStoreHandler` is the **only**
+  writer of the dedicated read store, is idempotent, and classifies
+  unsupported/malformed events as `PermanentMessageError` → DLQ.
+- **New event type `order.status.changed`** — confirm/cancel command handlers
+  publish it before the DB commit so the write model and the read store can
+  lag-and-converge; a publish failure rolls back the command.
+- **Query handlers read ONLY the read store** — `GetOrderQueryHandler` and
+  `ListOrdersQueryHandler` now go through `OrderReadStoreRepository`; the
+  Week-7 fallback to the cached projection table was removed.
+- **Eventual-consistency tests** (6 in `test_read_store_consistency.py`):
+  404-before-projection, convergence-on-project, confirm/cancel status-lag then
+  convergence via the new event, cancel-before-projection safety (out-of-order
+  delivery), idempotent double-delivery, and `update_status` on a missing
+  document without crashing.
+- **Read-projector handler unit tests** (7 in `test_read_projector.py`):
+  full projection, status-only update, idempotency, unsupported-event /
+  malformed-payload → DLQ, store↔record round-trip, and missing-document
+  safety.
+- **Read-latency benchmark** — `scripts/benchmark_reads.py` measures all three
+  read strategies side-by-side: 5,000 orders, 1,000 iterations per strategy.
+  Week-8 in-memory GET-by-id ≈ 163× faster than the pre-CQRS normalized join;
+  list-by-customer ≈ 140× faster than the write-side full scan.
+- **Docker Compose additions** — `elasticsearch` service (single-node,
+  `xpack.security.enabled=false`, `ES_JAVA_OPTS="-Xms512m -Xmx512m"`),
+  `readprojector` service, `esdata` volume, API env with `READ_STORE_*`
+  settings; local mode uses the in-memory store with no infrastructure.
+- **Full test suite**: `pytest -v` — 140 passed, 0 failed.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -929,6 +1089,7 @@ in `docker-compose.yml`.
 - [x] Full event lifecycle structured logging (publish/receive/ack/nack/retry/DLQ) + 102 tests (Week 5)
 - [x] Separate async worker: inventory stock deduction with exponential-backoff retries + DLQ + 117 tests (Week 6)
 - [x] CQRS: write side (commands) / read side (queries) split via in-process CqrsBus, write-optimized write DB + read-optimized projection `orders_read_orders` + 127 tests (Week 7)
+- [x] CQRS read phase: dedicated read store (Elasticsearch in compose, in-memory in dev/test), async read-projector consumer group as the only read-store writer, query handlers reading exclusively from the read store, eventual-consistency + projector tests, read-latency benchmark + 140 tests (Week 8)
 - [ ] Redis-backed token bucket rate limiter (from scratch)
 - [ ] OpenTelemetry distributed tracing (Jaeger/Zipkin)
 - [ ] Chaos engineering resilience tests

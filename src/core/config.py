@@ -16,10 +16,20 @@ class Settings(BaseSettings):
     # --- Database (write model) ---
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/inventory_orders"
 
-    # --- Read store (CQRS read side, Week 7) ---
+    # --- Read store (CQRS read side, Weeks 7-8) ---
     # Left empty => single-database CQRS (read side shares the primary DB).
     # Set to a dedicated read-optimized DB to serve queries from a separate store.
     READ_DATABASE_URL: str | None = None
+
+    # --- Dedicated read store (CQRS read phase, Week 8) ---
+    # ORDER QUERY HANDLERS READ EXCLUSIVELY FROM THIS STORE. The sync worker
+    # (scripts/read_projector.py) consumes events from the broker and upserts
+    # denormalized documents here, giving eventual consistency. Elasticsearch
+    # is the production store (docker-compose); "inmemory" is a zero-dependency
+    # fallback used for local runs and the integration-test suite.
+    READ_STORE_TYPE: str = "inmemory"  # "elasticsearch" | "inmemory"
+    READ_STORE_URL: str | None = None  # e.g. http://elasticsearch:9200
+    READ_STORE_INDEX: str = "orders"   # Elasticsearch index holding order documents
 
     # --- Redis (rate limiting, caching) ---
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -38,9 +48,11 @@ class Settings(BaseSettings):
     BROKER_URL: str | None = None  # e.g. amqp://guest:guest@localhost:5672/
     EVENT_EXCHANGE: str = "inventory.orders.events"  # durable topic exchange
     ORDER_CREATED_ROUTING_KEY: str = "order.created"
+    ORDER_STATUS_CHANGED_ROUTING_KEY: str = "order.status.changed"
     ORDERS_PERSISTENCE_QUEUE: str = "orders.order-created.persistence"  # consumer group 1
     ORDERS_AUDIT_QUEUE: str = "orders.order-created.audit"              # consumer group 2
     ORDERS_INVENTORY_QUEUE: str = "orders.order-created.inventory"      # worker group (Week 6)
+    ORDERS_READ_QUEUE: str = "orders.order-created.read"                # read-projector group (Week 8)
     DEAD_LETTER_EXCHANGE: str = "inventory.orders.dlx"  # dead-letter topic exchange
     CONSUMER_PREFETCH_COUNT: int = 10
     CONSUMER_MAX_RETRIES: int = 3

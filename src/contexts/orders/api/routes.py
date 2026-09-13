@@ -7,10 +7,11 @@ RBAC:
    POST /orders/{id}/confirm — ADMIN, MANAGER
    POST /orders/{id}/cancel  — ADMIN, MANAGER, STAFF
 
-CQRS (Week 7) dependency chain: sessions -> repositories -> command/query
-handlers -> CqrsBus -> controller. Commands resolve a write session; queries
-resolve a read session (the read-optimized store when READ_DATABASE_URL is
-configured).
+CQRS (Weeks 7-8) dependency chain: the write side resolves a write session;
+the read side resolves the **dedicated read store** (Elasticsearch in Docker,
+in-memory in tests) — never the write database. Confirm/cancel command
+handlers additionally publish `order.status.changed` events so the
+read-projector sync worker keeps that read store eventually consistent.
 """
 from uuid import UUID
 
@@ -36,26 +37,32 @@ from src.contexts.orders.query_handlers import (
 )
 from src.contexts.orders.queries import GetOrderQuery, ListOrdersByCustomerQuery
 from src.contexts.orders.repositories.order_read_repository import OrderReadRepository
+from src.contexts.orders.repositories.order_read_store_repository import OrderReadStoreRepository
 from src.contexts.orders.repositories.order_write_repository import OrderWriteRepository
 from src.core.auth import get_current_user, require_roles
 from src.shared.cqrs import CqrsBus
 from src.shared.infrastructure.database import get_db_session
-from src.shared.infrastructure.read_database import get_read_db_session
 from src.shared.messaging.provider import get_event_publisher
+from src.shared.readstore.base import OrderReadStore
+from src.shared.readstore.factory import get_read_store
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 def get_order_controller(
     write_session: AsyncSession = Depends(get_db_session),
-    read_session: AsyncSession = Depends(get_read_db_session),
+    read_store: OrderReadStore = Depends(get_read_store),
     publisher=Depends(get_event_publisher),
 ) -> OrderController:
-    """Assemble the CQRS bus: write side on the write session, read side on the
-    read session. Command handlers that must keep the projection in sync use the
-    write session for BOTH repositories so they share one transaction."""
+    """Assemble the CQRS bus.
+
+    Write side: commands operate on the write session (and keep the local
+    Postgres projection in sync transactionally). Read side: query handlers
+    read EXCLUSIVELY from the dedicated read store via the store-backed
+    repository — eventual consistency is expected when the read projector lags.
+    """
     write_repo = OrderWriteRepository(write_session)
-    read_repo = OrderReadRepository(read_session)
+    read_repo = OrderReadStoreRepository(read_store)
 
     bus = (
         CqrsBus()
@@ -66,6 +73,7 @@ def get_order_controller(
             ConfirmOrderCommandHandler(
                 write_repo,
                 OrderReadRepository(write_session),  # same-transaction projection sync
+                publisher,  # publishes order.status.changed for the read store
             ),
         )
         .register_command(
@@ -73,10 +81,11 @@ def get_order_controller(
             CancelOrderCommandHandler(
                 write_repo,
                 OrderReadRepository(write_session),
+                publisher,
             ),
         )
-        # --- read side (queries) ---
-        .register_query(GetOrderQuery, GetOrderQueryHandler(read_repo, write_repo))
+        # --- read side (queries) — dedicated read store only ---
+        .register_query(GetOrderQuery, GetOrderQueryHandler(read_repo))
         .register_query(
             ListOrdersByCustomerQuery,
             ListOrdersByCustomerQueryHandler(read_repo),
@@ -145,9 +154,12 @@ async def get_order(
 )
 async def confirm_order(
     order_id: UUID,
+    request: Request,
     controller: OrderController = Depends(get_order_controller),
 ) -> OrderResponse:
-    return await controller.confirm_order(order_id)
+    return await controller.confirm_order(
+        order_id, correlation_id=getattr(request.state, "request_id", None)
+    )
 
 
 @router.post(
@@ -164,6 +176,9 @@ async def confirm_order(
 )
 async def cancel_order(
     order_id: UUID,
+    request: Request,
     controller: OrderController = Depends(get_order_controller),
 ) -> OrderResponse:
-    return await controller.cancel_order(order_id)
+    return await controller.cancel_order(
+        order_id, correlation_id=getattr(request.state, "request_id", None)
+    )

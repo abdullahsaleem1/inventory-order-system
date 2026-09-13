@@ -17,6 +17,7 @@ from src.core.logging_config import configure_logging, get_logger
 from src.core.middleware import RequestLoggingMiddleware
 from src.core.system_routes import router as system_router
 from src.shared.messaging.provider import build_event_publisher, close_event_publisher
+from src.shared.readstore import build_read_store, close_read_store
 
 configure_logging()
 logger = get_logger(__name__)
@@ -86,13 +87,13 @@ app.openapi = custom_openapi
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # Build the RabbitMQ publisher from settings (connection is lazy — opened
-    # on first publish and auto-reconnected thereafter).
     build_event_publisher()
+    build_read_store()
     logger.info("application_startup", extra={"env": settings.ENV})
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     await close_event_publisher()
+    await close_read_store()
     logger.info("application_shutdown")

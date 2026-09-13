@@ -82,18 +82,22 @@ class OrderController:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return self._to_response(record)
 
-    async def confirm_order(self, order_id: UUID) -> OrderResponse:
+    async def confirm_order(self, order_id: UUID, *, correlation_id: str | None = None) -> OrderResponse:
         try:
-            order = await self._bus.dispatch_command(ConfirmOrderCommand(order_id))
+            order = await self._bus.dispatch_command(
+                ConfirmOrderCommand(order_id, correlation_id=correlation_id)
+            )
         except OrderNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except (EmptyOrderError, InvalidOrderTransitionError) as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         return self._to_response(order)
 
-    async def cancel_order(self, order_id: UUID) -> OrderResponse:
+    async def cancel_order(self, order_id: UUID, *, correlation_id: str | None = None) -> OrderResponse:
         try:
-            order = await self._bus.dispatch_command(CancelOrderCommand(order_id))
+            order = await self._bus.dispatch_command(
+                CancelOrderCommand(order_id, correlation_id=correlation_id)
+            )
         except OrderNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except InvalidOrderTransitionError as exc:

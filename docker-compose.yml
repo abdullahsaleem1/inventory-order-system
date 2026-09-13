@@ -8,13 +8,16 @@ services:
     env_file:
       - .env
     environment:
-      # Inside the compose network the broker is the rabbitmq service.
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/
+      READ_STORE_TYPE: elasticsearch
+      READ_STORE_URL: http://elasticsearch:9200
     depends_on:
       db:
         condition: service_started
       rabbitmq:
         condition: service_healthy
+      elasticsearch:
+        condition: service_started
     volumes:
       - ./src:/app/src
 
@@ -92,6 +95,54 @@ services:
       retries: 5
       start_period: 15s
 
+  # --- CQRS dedicated read store (Week 8) ---
+  # Elasticsearch holds ONE denormalized document per order. Query handlers
+  # read EXCLUSIVELY from this store (never the write database); the read
+  # projector worker below keeps it filled by consuming broker events.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # Sync worker (Week 8) — a SEPARATE service that consumes `order.created`
+  # and `order.status.changed` events from the broker and upserts documents
+  # into the Elasticsearch read store. Query endpoints become readable only
+  # once this worker has projected the events (eventual consistency). It is
+  # idempotent, so scale out safely: docker compose up --scale readprojector=2.
+  readprojector:
+    build: .
+    command: python -m scripts.read_projector
+    env_file:
+      - .env
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/
+      READ_STORE_TYPE: elasticsearch
+      READ_STORE_URL: http://elasticsearch:9200
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/inventory_orders
+      DEBUG: "false"
+    depends_on:
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
   # Management UI for Postgres — added per Week 1 admin feedback.
   # Visit http://localhost:5050, log in with the credentials below, then add
   # a server manually: host=db, port=5432, user=postgres, password=postgres.
@@ -115,3 +166,4 @@ volumes:
   pgdata:
   pgadmin_data:
   rabbitmq_data:
+  esdata:

@@ -28,6 +28,9 @@ class EventTypes:
     """Registry of all event types in the system (one per use case)."""
 
     ORDER_CREATED = "order.created"
+    # Week 8: emitted by confirm/cancel command handlers so the read-projector
+    # sync worker can keep the dedicated read store's status eventually current.
+    ORDER_STATUS_CHANGED = "order.status.changed"
 
 
 class MessageDecodeError(Exception):

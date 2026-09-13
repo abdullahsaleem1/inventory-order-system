@@ -44,6 +44,7 @@ class RabbitMQEventPublisher:
         self._exchange_name = settings.EVENT_EXCHANGE
         self._routing_keys = routing_keys or {  # event_type -> routing key
             "order.created": settings.ORDER_CREATED_ROUTING_KEY,
+            "order.status.changed": settings.ORDER_STATUS_CHANGED_ROUTING_KEY,
         }
         self._logger = get_logger("messaging.publisher")
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None

@@ -19,6 +19,10 @@ python-multipart==0.0.32    # application/x-www-form-urlencoded (OAuth2 token en
 # --- event pipeline (Week 5) ---
 aio-pika==9.5.5              # async RabbitMQ client (robust connections, publisher confirms)
 
+# --- CQRS read store (Week 8) ---
+elasticsearch==8.19.3        # async client for the dedicated Elasticsearch read store
+aiohttp==3.14.3              # async HTTP transport for the Elasticsearch client
+
 # --- test tooling ---
 pytest==9.1.1
 pytest-asyncio==1.4.0

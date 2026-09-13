@@ -30,6 +30,7 @@ class ConfirmOrderCommand(Command):
     """Intention to transition a PENDING order to CONFIRMED."""
 
     order_id: UUID
+    correlation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -37,3 +38,4 @@ class CancelOrderCommand(Command):
     """Intention to cancel an order."""
 
     order_id: UUID
+    correlation_id: str | None = None

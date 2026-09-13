@@ -1,51 +1,41 @@
 """
-Orders bounded context — CQRS query handlers (Week 7).
+Orders bounded context — CQRS query handlers (Week 7, read phase Week 8).
 
 The read side. Every data-retrieval use case is a `Query` (queries.py) answered
-by exactly one of these. Handlers read from the read-optimized projection via
-`OrderReadRepository` — never from the normalized write tables.
+by exactly one of these.
 
-`GetOrderQueryHandler` performs a bounded fallback to the write store when the
-projection has not caught up yet (eventual consistency): the projection is
-populated by the async persistence consumer, so a GET racing the consumer
-returns the aggregate and still answers correctly.
+Since Week 8 the query handlers read **exclusively from the dedicated read
+store** (`OrderReadStoreRepository` over the Elasticsearch/in-memory read
+store). There is deliberately no fall-back to the write database: a GET that
+races the async read projector returns 404 until the read store catches up —
+that is the expected eventual-consistency behaviour of a CQRS read phase, and
+it keeps the write path free of read traffic.
 """
-from uuid import UUID
-
 from src.contexts.orders.errors import OrderNotFoundError
 from src.contexts.orders.queries import GetOrderQuery, ListOrdersByCustomerQuery
-from src.contexts.orders.repositories.order_read_repository import (
-    OrderReadRecord,
-    OrderReadRepository,
-    record_from_order,
+from src.contexts.orders.repositories.order_read_store_repository import (
+    OrderReadStoreRepository,
 )
-from src.contexts.orders.repositories.order_write_repository import OrderWriteRepository
 
 
 class GetOrderQueryHandler:
-    def __init__(self, read_repo: OrderReadRepository, write_repo: OrderWriteRepository) -> None:
+    def __init__(self, read_repo: OrderReadStoreRepository) -> None:
         self._read_repo = read_repo
-        self._write_repo = write_repo
 
-    async def handle(self, query: GetOrderQuery) -> OrderReadRecord:
+    async def handle(self, query: GetOrderQuery) -> "object":
         record = await self._read_repo.get_by_id(query.order_id)
-        if record is not None:
-            return record
-        # Projection not yet written (async consumer is still catching up) —
-        # fall back to the write aggregate so the read still succeeds.
-        order = await self._write_repo.get_by_id(query.order_id)
-        if order is None:
+        if record is None:
             raise OrderNotFoundError(f"Order {query.order_id} not found")
-        return record_from_order(order)
+        return record
 
 
 class ListOrdersByCustomerQueryHandler:
-    """Answers off the customer_id index on the read model only."""
+    """Answers off the dedicated read store's customer_id index only."""
 
-    def __init__(self, read_repo: OrderReadRepository) -> None:
+    def __init__(self, read_repo: OrderReadStoreRepository) -> None:
         self._read_repo = read_repo
 
-    async def handle(self, query: ListOrdersByCustomerQuery) -> list[OrderReadRecord]:
+    async def handle(self, query: ListOrdersByCustomerQuery) -> list["object"]:
         return await self._read_repo.list_by_customer(
             query.customer_id,
             limit=query.limit,
