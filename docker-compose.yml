@@ -18,6 +18,8 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_started
+      redis:
+        condition: service_started
     volumes:
       - ./src:/app/src
 
@@ -143,6 +145,24 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
+  # Redis (Week 9) — hosts the token-bucket rate-limiter state. Each bucket's
+  # read-refill-spend-write runs inside one atomically-executed Lua script, so
+  # request bursts are strictly capped even under concurrency. Redis is
+  # OPTIONAL at runtime: if it is down, the API degrades to per-process
+  # in-memory buckets instead of crashing (see /ready -> redis: degraded).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # Management UI for Postgres — added per Week 1 admin feedback.
   # Visit http://localhost:5050, log in with the credentials below, then add
   # a server manually: host=db, port=5432, user=postgres, password=postgres.
@@ -159,7 +179,6 @@ services:
       - pgadmin_data:/var/lib/pgadmin
 
   # --- added in later weeks ---
-  # redis:        # Redis token-bucket rate limiter
   # jaeger:       # OpenTelemetry trace visualization
 
 volumes:
@@ -167,3 +186,4 @@ volumes:
   pgadmin_data:
   rabbitmq_data:
   esdata:
+  redis_data:

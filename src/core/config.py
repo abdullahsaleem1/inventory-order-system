@@ -31,8 +31,26 @@ class Settings(BaseSettings):
     READ_STORE_URL: str | None = None  # e.g. http://elasticsearch:9200
     READ_STORE_INDEX: str = "orders"   # Elasticsearch index holding order documents
 
-    # --- Redis (rate limiting, caching) ---
+    # --- Redis (rate limiting, Week 9) ---
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # --- Rate limiting (Week 9) ---
+    # Token-bucket tiers per role. `capacity` = burst allowance; `rate` = tokens
+    # (requests) refilled per second. Anonymous (missing/invalid token) traffic
+    # is keyed by client IP and uses the strictest tier.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_BUCKET_TTL_SECONDS: int = 60      # idle buckets expire
+    RATE_LIMIT_REDIS_TIMEOUT_SECONDS: float = 0.5  # per-command Redis timeout
+    RATE_LIMIT_ANON_CAPACITY: int = 5
+    RATE_LIMIT_ANON_RATE: float = 1.0
+    RATE_LIMIT_CUSTOMER_CAPACITY: int = 10
+    RATE_LIMIT_CUSTOMER_RATE: float = 2.0
+    RATE_LIMIT_STAFF_CAPACITY: int = 20
+    RATE_LIMIT_STAFF_RATE: float = 5.0
+    RATE_LIMIT_MANAGER_CAPACITY: int = 50
+    RATE_LIMIT_MANAGER_RATE: float = 10.0
+    RATE_LIMIT_ADMIN_CAPACITY: int = 100
+    RATE_LIMIT_ADMIN_RATE: float = 20.0
 
     # --- Auth / JWT ---
     # Minimum 32 bytes required for HS256 (RFC 7518 §3.2) — enforced below.

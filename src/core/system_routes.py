@@ -4,9 +4,9 @@ System-level routes: liveness and readiness checks.
 /health  — liveness: is the process up? Never touches the DB. Used by
            orchestrators to decide whether to restart the container.
 /ready   — readiness: can the service actually serve traffic right now?
-           Checks the DB connection and (since Week 5) the RabbitMQ broker.
-           Used by load balancers/orchestrators to decide whether to route
-           traffic to this instance.
+           Checks the DB connection, the RabbitMQ broker, and the Redis
+           rate-limiter (Redis is reported but does NOT fail readiness —
+           the API degrades gracefully instead of crashing, see Week 9).
 """
 from typing import Literal
 
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.logging_config import get_logger
 from src.shared.infrastructure.database import get_db_session
 from src.shared.messaging.provider import probe_broker
+from src.core.ratelimit.provider import probe_rate_limiter
 
 router = APIRouter(tags=["System"])
 logger = get_logger(__name__)
@@ -31,6 +32,7 @@ class ReadinessResponse(BaseModel):
     status: Literal["ready", "not_ready"]
     database: Literal["up", "down"]
     broker: Literal["up", "down", "disabled"]
+    redis: Literal["up", "down", "disabled"]
 
 
 @router.get("/health", response_model=HealthResponse, summary="Liveness check")
@@ -53,8 +55,14 @@ async def readiness_check(
         database = "down"
 
     broker = await probe_broker()
+    redis_status = await probe_rate_limiter()
 
     ready = database == "up" and broker != "down"
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return ReadinessResponse(status="ready" if ready else "not_ready", database=database, broker=broker)
+    return ReadinessResponse(
+        status="ready" if ready else "not_ready",
+        database=database,
+        broker=broker,
+        redis=redis_status,
+    )

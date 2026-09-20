@@ -34,6 +34,10 @@ from src.shared.messaging.publisher import InMemoryEventPublisher
 from src.shared.readstore import InMemoryOrderReadStore
 from src.shared.readstore.factory import get_read_store
 
+from src.core.ratelimit.backends import InMemoryTokenBucket
+from src.core.ratelimit.policy import RateLimitPolicy
+from src.core.ratelimit.provider import RateLimiter, reset_rate_limiter, set_rate_limiter
+
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
@@ -61,6 +65,21 @@ def _make_read_store_wiring() -> InMemoryOrderReadStore:
 
     app.dependency_overrides[get_read_store] = override_get_read_store
     return read_store
+
+
+def _install_disabled_rate_limiter() -> None:
+    """Rate limiting logic is covered by dedicated tests (tests/ratelimit/);
+    every other integration test runs with the limiter disabled so the
+    pre-existing 140 tests keep their exact semantics. The disabled limiter
+    passes every request straight through (no 429s, no headers)."""
+    set_rate_limiter(
+        RateLimiter(
+            InMemoryTokenBucket(),
+            InMemoryTokenBucket(),
+            RateLimitPolicy(),
+            enabled=False,
+        )
+    )
 
 
 def _subscribe_read_pipeline(session_factory, read_store) -> InMemoryEventPublisher:
@@ -112,12 +131,14 @@ async def client():
     # sync worker round-trip; queries read from the projected read store).
     read_store = _make_read_store_wiring()
     _subscribe_read_pipeline(session_factory, read_store)
+    _install_disabled_rate_limiter()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
     app.dependency_overrides.clear()
+    reset_rate_limiter()
     await engine.dispose()
 
 
@@ -161,12 +182,14 @@ async def evented_client():
     )
     publisher.read_store = read_store
     app.dependency_overrides[get_event_publisher] = lambda: publisher
+    _install_disabled_rate_limiter()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client, publisher
 
     app.dependency_overrides.clear()
+    reset_rate_limiter()
     await engine.dispose()
 
 
@@ -199,6 +222,7 @@ async def no_broker_client():
     app.dependency_overrides[get_db_session] = override_get_db_session
     app.dependency_overrides[get_read_db_session] = override_get_read_db_session
     _make_read_store_wiring()
+    _install_disabled_rate_limiter()
     app.dependency_overrides.pop(get_event_publisher, None)
 
     transport = ASGITransport(app=app)
@@ -206,4 +230,5 @@ async def no_broker_client():
         yield http_client
 
     app.dependency_overrides.clear()
+    reset_rate_limiter()
     await engine.dispose()

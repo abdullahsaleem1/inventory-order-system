@@ -705,6 +705,41 @@ python -m scripts.benchmark_reads --orders 5000 --iterations 1000
 python -m scripts.benchmark_reads --orders 5000 --iterations 1000 --es-url http://localhost:9200
 ```
 
+## Rate Limiting — Token Bucket (Week 9)
+
+A from-scratch **token-bucket** rate limiter guards every request. Buckets are
+administered by **Redis** (via a single atomic Lua script) so the burst cap is
+strict even under concurrency; when Redis is down the API degrades to
+per-process in-memory buckets instead of failing.
+
+| Identity class | Bucket capacity (burst) | Refill rate (req/s) |
+| -------------- | ----------------------- | ------------------- |
+| anonymous (per IP) | 5 | 1 |
+| CUSTOMER (per user) | 10 | 2 |
+| STAFF (per user) | 20 | 5 |
+| MANAGER (per user) | 50 | 10 |
+| ADMIN (per user) | 100 | 20 |
+
+- Authenticated users are keyed `user:{sub}`; anonymous callers `ip:{host}`.
+- Limits are per user/role, not per IP for authenticated traffic.
+- Exceeding a bucket returns **429 TOO_MANY_REQUESTS** with the standard error
+  envelope and `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+  `X-RateLimit-Retry-After` headers.
+- Redis down? Requests keep flowing, rate-limited per instance, with
+  `X-RateLimit-Degraded: true`; `/ready` shows `redis: degraded`.
+- System paths (`/health`, `/ready`, `/docs`, `/redoc`, `/openapi.json`) are
+  never rate-limited.
+
+```bash
+# Local dev without Redis — disable it (or let it auto-degrade):
+RATE_LIMIT_ENABLED=false uvicorn src.main:app --reload
+
+# Concurrency load test against the running compose stack (Redis-backed):
+docker compose up --build -d
+python -m scripts.loadtest_ratelimit --url http://localhost:8000 --concurrency 40
+# To see degradation: docker compose stop redis
+```
+
 ## Getting Started
 
 ### Local (without Docker)
@@ -742,9 +777,10 @@ python -m scripts.read_projector
 cp .env.example .env
 docker compose up --build
 # services: api + consumer + worker + readprojector + db + elasticsearch
-#                     + rabbitmq + pgadmin
+#                     + rabbitmq + pgadmin + redis
 # API runs with READ_STORE_TYPE=elasticsearch; the readprojector consumer
 # group fills the Elasticsearch index from order.created / order.status.changed
+# Redis hosts the token-bucket rate-limiter state (Week 9).
 
 # in a separate terminal, once the api/db containers are up:
 docker compose exec api alembic upgrade head
@@ -795,7 +831,7 @@ pip install -r requirements.txt
 pytest -v
 ```
 
-**140 integration tests** (all passing), organized as:
+**172 integration + unit tests** (all passing), organized as:
 
 | Test File | Tests | Coverage |
 | --------- | ----- | -------- |
@@ -815,6 +851,9 @@ pytest -v
 | `tests/inventory/test_product_domain.py` | 8 | Product domain unit tests (stock rules, SKU validation) |
 | `tests/identity/test_password_hasher.py` | 3 | bcrypt hashing, salt, verify |
 | `tests/identity/test_jwt_service.py` | 2 | JWT signing, expiry, tamper/signature/audience rejection |
+| `tests/ratelimit/test_token_bucket.py` | 11 | **Week 9 token-bucket unit tests:** pure `attempt()` math (burst cap, capped balance, refill over time, deny + retry-after, rate=0 → ∞, negative-clock clamp, remaining = floor) plus the in-memory backend (exact-capacity burst, strict multi-task burst never overspends, isolated keys, refill unblocks) |
+| `tests/ratelimit/test_redis_backend.py` | 9 | **Week 9 Redis backend:** Lua-script registration, KEYS/ARGV marshalling, result parsing, Redis/Response errors → `RateLimiterUnavailableError`, ping-up/ping-down, key pass-through matching the pure math |
+| `tests/ratelimit/test_middleware.py` | 12 | **Week 9 middleware integration over the real HTTP stack:** anonymous IP burst caps at capacity, 429 envelope + `Retry-After`/`X-RateLimit-*` headers, role tiers, per-user keying (not per-IP), exempt `/health`/`/ready`, `/ready` redis status, degraded Redis→in-memory fallback stamping `X-RateLimit-Degraded`, recovery clears degraded, disabled-limiter passthrough |
 
 Integration tests run against an **in-memory SQLite** DB injected via
 `get_db_session` (write side) and `get_read_db_session` (read side) dependency
@@ -1075,6 +1114,68 @@ in `docker-compose.yml`.
   settings; local mode uses the in-memory store with no infrastructure.
 - **Full test suite**: `pytest -v` — 140 passed, 0 failed.
 
+### Week 9 — Redis-Backed Token-Bucket Rate Limiting
+
+**Admin feedback addressed:** rate limiting is implemented **from scratch** —
+no pre-built middleware/library (no `slowapi`/`limits`). The token-bucket
+algorithm, the middleware, and the Redis backend are all hand-written using
+raw Redis primitives.
+
+- **Token-bucket algorithm from scratch** (`src/core/ratelimit/token_bucket.py`):
+  a pure, framework-agnostic `attempt()` step (`balance = min(capacity, tokens
+  + elapsed*rate)`, spend-if-available, `retry_after = ceil((cost-balance)/rate)`)
+  shared by every backend so the math is unit-tested once. A fresh bucket holds
+  `capacity` tokens; tokens accrue at `rate`/sec up to `capacity`; each request
+  costs one token; `Math.ceil`/`math.ceil` floors `retry_after` to whole seconds
+  for the `Retry-After` header.
+- **Redis is the strict, atomic backend** (`src/core/ratelimit/backends.py`):
+  the entire read-refill-spend-write for one key runs inside a **single Lua
+  script** (`_TOKEN_BUCKET_LUA`) that Redis executes atomically — two
+  concurrent requests can never both observe the same last token, so bursts
+  are capped *exactly* even under concurrency. Bucket state lives in a Redis
+  hash (`tokens` + `ts`) refreshed with a sliding TTL.
+- **Tiered limits by role** (`policy.py`): ADMIN > MANAGER > STAFF > CUSTOMER >
+  anonymous. Authenticated callers are keyed by `user:{sub}` and limited by
+  their JWT role's tier; anonymous/missing-token traffic is keyed by
+  `ip:{client_host}` and gets the strictest tier. Tiers are fully configurable
+  via env vars (`RATE_LIMIT_*_CAPACITY`/`RATE_LIMIT_*_RATE`), defaults:
+  ANON 5/1, CUSTOMER 10/2, STAFF 20/5, MANAGER 50/10, ADMIN 100/20.
+- **Middleware** (`middleware.py`): runs for every request ahead of routing
+  (inside `RequestLoggingMiddleware`, so 429s are logged with a request_id).
+  Emits the standard error envelope (`error.code = TOO_MANY_REQUESTS`) with
+  `Retry-After` and `X-RateLimit-Limit`/`X-RateLimit-Remaining`/
+  `X-RateLimit-Retry-After` headers, plus `X-RateLimit-Degraded: true` when
+  operating on the in-memory fallback. Identity is resolved without a DB hit by
+  decoding the Bearer JWT (signature + expiry only); `/health`, `/ready`,
+  `/docs`, `/redoc`, `/openapi.json`, `/favicon.ico` are never rate-limited.
+- **Graceful degradation** (`provider.py`): Redis is *optional at runtime*. If
+  it is unreachable when first used or goes down mid-flight, `RateLimiter`
+  catches `RateLimiterUnavailableError` and serves the request from a per-process
+  `InMemoryTokenBucket` fallback — the API keeps rate limiting (per instance)
+  instead of crashing. Recovery clears the degraded flag automatically. `/ready`
+  now reports `redis: up | degraded | disabled` alongside DB + broker.
+- **Redis via Docker Compose** — new `redis:7-alpine` service with healthcheck
+  and `redis_data` volume; the `api` service depends on it and `REDIS_URL`
+  points at `redis://redis:6379/0`. In pure-local mode, `RATE_LIMIT_ENABLED=false`
+  (or just let it degrade) needs nothing started.
+- **Tests (`tests/ratelimit/`, 32)** — pure `attempt()` math (burst cap,
+  refill, deny + retry-after, `rate=0` → ∞, negative-clock clamp), the in-memory
+  backend (isolated keys, strict multi-task burst never overspends capacity),
+  the Redis wrapper driven by a fake async client that mirrors the Lua math
+  (marshalling KEYS/ARGV, result parsing, error → `RateLimiterUnavailableError`),
+  and full middleware integration over the HTTP stack: anonymous IP caps,
+  role tiers, per-user bucket isolation, exempt paths, the 429 envelope +
+  headers, degraded fallback, and disabled-limiter passthrough. Rate limiting is
+  disabled in every pre-existing fixture so the prior 140 tests keep their exact
+  semantics.
+- **Concurrency load test** — `scripts/loadtest_ratelimit.py` fires
+  concurrent bursts against the running stack and asserts the four guarantees:
+  exact burst cap under concurrency (Lua atomicity), tier separation under an
+  anonymous flood, refill instead of ban, and `X-RateLimit-Degraded` when Redis
+  is stopped.
+- **Dependencies added:** `redis==6.4.0` (supports Python 3.14).
+- **Full test suite**: `pytest -v` — 172 passed, 0 failed.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -1090,6 +1191,6 @@ in `docker-compose.yml`.
 - [x] Separate async worker: inventory stock deduction with exponential-backoff retries + DLQ + 117 tests (Week 6)
 - [x] CQRS: write side (commands) / read side (queries) split via in-process CqrsBus, write-optimized write DB + read-optimized projection `orders_read_orders` + 127 tests (Week 7)
 - [x] CQRS read phase: dedicated read store (Elasticsearch in compose, in-memory in dev/test), async read-projector consumer group as the only read-store writer, query handlers reading exclusively from the read store, eventual-consistency + projector tests, read-latency benchmark + 140 tests (Week 8)
-- [ ] Redis-backed token bucket rate limiter (from scratch)
+- [x] Redis-backed token bucket rate limiter (from scratch, no library): atomic Lua backend, per-role tiers, graceful degradation + in-memory fallback, 429 envelope + headers, Redis via Docker Compose, concurrency load test + 172 tests (Week 9)
 - [ ] OpenTelemetry distributed tracing (Jaeger/Zipkin)
 - [ ] Chaos engineering resilience tests

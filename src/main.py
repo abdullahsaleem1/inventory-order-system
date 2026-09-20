@@ -15,6 +15,8 @@ from src.core.config import get_settings
 from src.core.error_handlers import register_exception_handlers
 from src.core.logging_config import configure_logging, get_logger
 from src.core.middleware import RequestLoggingMiddleware
+from src.core.ratelimit.middleware import RateLimitMiddleware
+from src.core.ratelimit.provider import build_rate_limiter, close_rate_limiter, probe_rate_limiter
 from src.core.system_routes import router as system_router
 from src.shared.messaging.provider import build_event_publisher, close_event_publisher
 from src.shared.readstore import build_read_store, close_read_store
@@ -40,6 +42,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Middleware order note (Week 9): RateLimitMiddleware runs INSIDE
+# RequestLoggingMiddleware so every request — including 429s — is logged and
+# carries a request_id, and rate-limit decisions happen before routing.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 register_exception_handlers(app)
 
@@ -89,6 +95,7 @@ app.openapi = custom_openapi
 async def on_startup() -> None:
     build_event_publisher()
     build_read_store()
+    build_rate_limiter()
     logger.info("application_startup", extra={"env": settings.ENV})
 
 
@@ -96,4 +103,5 @@ async def on_startup() -> None:
 async def on_shutdown() -> None:
     await close_event_publisher()
     await close_read_store()
+    await close_rate_limiter()
     logger.info("application_shutdown")
