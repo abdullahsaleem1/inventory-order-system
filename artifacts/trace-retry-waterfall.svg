@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="416" viewBox="0 0 1160 416" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="20" y="30" font-size="17" font-weight="600" fill="#111827">POST /orders (transient failure + retry)</text>
+<text x="20" y="52" font-size="12" fill="#6b7280">10 spans &#183; 2 services &#183; trace 52528243bf98abc1&#8230; &#183; 3.79 ms</text>
+<line x1="450.0" y1="72" x2="450.0" y2="386" stroke="#e5e7eb" stroke-width="1"/>
+<text x="450.0" y="66" font-size="10" fill="#9ca3af" text-anchor="middle">0.00 ms</text>
+<line x1="590.0" y1="72" x2="590.0" y2="386" stroke="#e5e7eb" stroke-width="1"/>
+<text x="590.0" y="66" font-size="10" fill="#9ca3af" text-anchor="middle">0.95 ms</text>
+<line x1="730.0" y1="72" x2="730.0" y2="386" stroke="#e5e7eb" stroke-width="1"/>
+<text x="730.0" y="66" font-size="10" fill="#9ca3af" text-anchor="middle">1.89 ms</text>
+<line x1="870.0" y1="72" x2="870.0" y2="386" stroke="#e5e7eb" stroke-width="1"/>
+<text x="870.0" y="66" font-size="10" fill="#9ca3af" text-anchor="middle">2.84 ms</text>
+<line x1="1010.0" y1="72" x2="1010.0" y2="386" stroke="#e5e7eb" stroke-width="1"/>
+<text x="1010.0" y="66" font-size="10" fill="#9ca3af" text-anchor="middle">3.79 ms</text>
+<rect x="0" y="86" width="1160" height="30" fill="#f9fafb"/>
+<text x="34" y="106" font-size="12" fill="#111827">POST /orders</text>
+<text x="422" y="106" font-size="10" fill="#1a237e" text-anchor="end">inventory-orders-api</text>
+<rect x="450.0" y="92" width="66.7" height="18" rx="3" fill="#26a69a" fill-opacity="0.85"/>
+<text x="522.7" y="106" font-size="10" fill="#6b7280">0.45 ms &#183; server</text>
+<text x="50" y="136" font-size="12" fill="#111827">jwt.verify</text>
+<text x="422" y="136" font-size="10" fill="#1a237e" text-anchor="end">inventory-orders-api</text>
+<rect x="459.6" y="122" width="3.0" height="18" rx="3" fill="#5c6bc0" fill-opacity="0.85"/>
+<text x="468.6" y="136" font-size="10" fill="#6b7280">0.02 ms &#183; internal</text>
+<rect x="0" y="146" width="1160" height="30" fill="#f9fafb"/>
+<text x="50" y="166" font-size="12" fill="#111827">command CreateOrderCommand</text>
+<text x="422" y="166" font-size="10" fill="#1a237e" text-anchor="end">inventory-orders-api</text>
+<rect x="467.6" y="152" width="47.3" height="18" rx="3" fill="#5c6bc0" fill-opacity="0.85"/>
+<text x="520.8" y="166" font-size="10" fill="#6b7280">0.32 ms &#183; internal</text>
+<text x="66" y="196" font-size="12" fill="#111827">INSERT orders</text>
+<text x="422" y="196" font-size="10" fill="#1a237e" text-anchor="end">inventory-orders-api</text>
+<rect x="473.2" y="182" width="7.0" height="18" rx="3" fill="#42a5f5" fill-opacity="0.85"/>
+<text x="486.3" y="196" font-size="10" fill="#6b7280">0.05 ms &#183; client</text>
+<rect x="0" y="206" width="1160" height="30" fill="#f9fafb"/>
+<text x="66" y="226" font-size="12" fill="#111827">inventory.orders.events publish</text>
+<text x="422" y="226" font-size="10" fill="#1a237e" text-anchor="end">inventory-orders-api</text>
+<rect x="495.2" y="212" width="18.0" height="18" rx="3" fill="#ab47bc" fill-opacity="0.85"/>
+<text x="519.2" y="226" font-size="10" fill="#6b7280">0.12 ms &#183; producer</text>
+<text x="82" y="256" font-size="12" fill="#111827">orders.order-created.inventory process</text>
+<text x="422" y="256" font-size="10" fill="#b71c1c" text-anchor="end">inventory-worker</text>
+<rect x="700.7" y="242" width="23.6" height="18" rx="3" fill="#ffa726" fill-opacity="0.85"/>
+<text x="730.3" y="256" font-size="10" fill="#6b7280">0.16 ms &#183; consumer</text>
+<rect x="0" y="266" width="1160" height="30" fill="#f9fafb"/>
+<text x="98" y="286" font-size="12" fill="#111827">SELECT products</text>
+<text x="422" y="286" font-size="10" fill="#b71c1c" text-anchor="end">inventory-worker</text>
+<rect x="713.8" y="272" width="3.0" height="18" rx="3" fill="#42a5f5" fill-opacity="0.85"/>
+<text x="722.8" y="286" font-size="10" fill="#6b7280">0.01 ms &#183; client</text>
+<text x="98" y="316" font-size="12" fill="#111827">INSERT inventory_deduplication_log</text>
+<text x="422" y="316" font-size="10" fill="#b71c1c" text-anchor="end">inventory-worker</text>
+<rect x="719.8" y="302" width="3.0" height="18" rx="3" fill="#42a5f5" fill-opacity="0.85"/>
+<text x="728.8" y="316" font-size="10" fill="#6b7280">0.01 ms &#183; client</text>
+<rect x="0" y="326" width="1160" height="30" fill="#f9fafb"/>
+<text x="82" y="346" font-size="12" fill="#111827">orders.order-created.inventory process</text>
+<text x="422" y="346" font-size="10" fill="#b71c1c" text-anchor="end">inventory-worker</text>
+<rect x="734.6" y="332" width="275.4" height="18" rx="3" fill="#ffa726" fill-opacity="0.85"/>
+<text x="1016.0" y="346" font-size="10" fill="#6b7280">1.86 ms &#183; consumer</text>
+<rect x="733.6" y="331" width="277.4" height="20" rx="4" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+<text x="98" y="376" font-size="12" fill="#111827">orders.order-created.inventory.retry.1 publish</text>
+<text x="422" y="376" font-size="10" fill="#b71c1c" text-anchor="end">inventory-worker</text>
+<rect x="940.5" y="362" width="66.6" height="18" rx="3" fill="#ab47bc" fill-opacity="0.85"/>
+<text x="1013.1" y="376" font-size="10" fill="#6b7280">0.45 ms &#183; producer</text>
+<rect x="939.5" y="361" width="68.6" height="20" rx="4" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+<text x="20" y="406" font-size="10" fill="#9ca3af">One trace across 2 services: the CONSUMER span in inventory-worker is a child of the PRODUCER span in the API, propagated through AMQP headers.</text>
+</svg>

@@ -6,8 +6,10 @@ OAuth2.0/JWT authorization server**, RBAC, sliding-window refresh tokens,
 **event-driven order creation over RabbitMQ** (durable topic exchange, consumer
 groups, retries + dead-lettering), **async order processing in a separate
 worker service** (inventory deduction with exponential-backoff retries),
-**CQRS with a dedicated write side and a read-optimized projection**, and
-structured JSON logging — containerized with Docker Compose.
+**CQRS with a dedicated write side and a read-optimized projection**,
+**OpenTelemetry distributed tracing that follows a request across the message
+broker into a separate worker**, and structured JSON logging — containerized
+with Docker Compose.
 
 ## Tech Stack
 - **Language/Framework:** Python 3.12+ (verified on 3.14), FastAPI
@@ -15,9 +17,10 @@ structured JSON logging — containerized with Docker Compose.
 - **Message broker:** RabbitMQ 3.13 (`aio-pika`) — durable queues, publisher confirms, DLQ, exponential-backoff retries
 - **Migrations:** Alembic
 - **Auth:** bcrypt password hashing + HS256-signed JWTs (PyJWT), OAuth2.0 password grant
+- **Observability:** OpenTelemetry SDK 1.44 + Jaeger via OTLP/gRPC — W3C trace-context propagated over AMQP message headers, trace-correlated JSON logs, `X-Trace-Id` responses
 - **Testing:** pytest + httpx, in-memory SQLite (aiosqlite) for DB-backed integration tests
-- Additional pieces (Redis, OpenTelemetry/Jaeger) are added as each corresponding
-  weekly deliverable is implemented — see progress log below.
+- Additional pieces (Redis) are added as each corresponding weekly deliverable
+  is implemented — see progress log below.
 
 ## Architecture
 
@@ -777,10 +780,11 @@ python -m scripts.read_projector
 cp .env.example .env
 docker compose up --build
 # services: api + consumer + worker + readprojector + db + elasticsearch
-#                     + rabbitmq + pgadmin + redis
+#                     + rabbitmq + pgadmin + redis + jaeger
 # API runs with READ_STORE_TYPE=elasticsearch; the readprojector consumer
 # group fills the Elasticsearch index from order.created / order.status.changed
 # Redis hosts the token-bucket rate-limiter state (Week 9).
+# Jaeger receives OTLP spans from all four application services (Week 10).
 
 # in a separate terminal, once the api/db containers are up:
 docker compose exec api alembic upgrade head
@@ -791,6 +795,11 @@ docker compose exec api python -m scripts.seed_data
   and enter credentials to call `/auth/me` from the docs.
 - Health check: `http://localhost:8000/health` (liveness) / `http://localhost:8000/ready`
   (readiness — checks DB **and** RabbitMQ).
+- **Jaeger UI** (distributed tracing, Week 10): `http://localhost:16686` —
+  pick a service (`inventory-orders-api`, `order-event-consumer`,
+  `inventory-worker`, `read-projector`) and **Find Traces**. A single
+  `POST /orders` shows the API's request, its publish to RabbitMQ, and the
+  worker's stock deduction as one trace.
 - **RabbitMQ management UI**: `http://localhost:15672` (`guest` / `guest`) —
   inspect the `inventory.orders.events` exchange, durable queues, bindings,
   DLQs, and live message rates.
@@ -1176,6 +1185,276 @@ raw Redis primitives.
 - **Dependencies added:** `redis==6.4.0` (supports Python 3.14).
 - **Full test suite**: `pytest -v` — 172 passed, 0 failed.
 
+## OpenTelemetry Distributed Tracing (Week 10)
+
+**What problem this solves.** Weeks 5–9 built a genuinely distributed system:
+an HTTP request, a message broker, and three consumer groups, each in its own
+process. When `POST /orders` is slow, the access log tells you *that* it was
+slow, and the worker logs tell you the worker was slow, but nothing connects
+the two. A request fans out to three queues, two of which can retry with
+backoff; without a shared trace id there is no way to answer "which of these
+four things ate the 2 seconds?". This week adds that thread.
+
+**The headline result:** one `POST /orders` request appears in Jaeger as a
+single trace spanning `inventory-orders-api` and `inventory-worker`, across a
+process boundary, with the consumer's work nested underneath the publish that
+caused it.
+
+![Captured trace: one trace across the API and the worker](artifacts/trace-waterfall.svg)
+
+*(Regenerated from real captured data — see [Trace artifact](#trace-artifact).)*
+
+### The captured trace
+
+```text
+POST /orders  [SERVER]    0.53ms  service=inventory-orders-api
+    +-- jwt.verify  [INTERNAL]    0.02ms  service=inventory-orders-api
+    +-- command CreateOrderCommand  [INTERNAL]    0.37ms  service=inventory-orders-api
+        +-- INSERT orders  [CLIENT]    0.04ms  service=inventory-orders-api
+        +-- inventory.orders.events publish  [PRODUCER]    0.15ms  service=inventory-orders-api
+            +-- orders.order-created.inventory process  [CONSUMER]    0.23ms  service=inventory-worker
+                +-- SELECT products  [CLIENT]    0.01ms  service=inventory-worker
+                +-- INSERT inventory_deduplication_log  [CLIENT]    0.01ms  service=inventory-worker
+```
+
+The nesting is the whole point. `orders.order-created.inventory process` runs
+in a **different container**, minutes or milliseconds later, and it is still a
+*child* of the `publish` span that put the message on the queue — because the
+publish wrote a W3C `traceparent` into the AMQP headers and the consumer read it
+back out.
+
+### What is instrumented
+
+| Layer | Mechanism | Span kind |
+| --- | --- | --- |
+| Inbound HTTP | `FastAPIInstrumentor` | `SERVER` |
+| Outbound HTTP | `FastAPIInstrumentor` (httpx) | `CLIENT` |
+| SQL / Postgres | `SQLAlchemyInstrumentor`, per engine | `CLIENT` |
+| CQRS commands & queries | hand-written in `shared/cqrs` | `INTERNAL` |
+| RabbitMQ publish | hand-written in `messaging/publisher.py` | `PRODUCER` |
+| RabbitMQ consume | hand-written in `messaging/consumer.py` | `CONSUMER` |
+| Retry republish | hand-written in `messaging/consumer.py` | `PRODUCER` |
+| Elasticsearch read store | hand-written in `readstore/elasticsearch_store.py` | `CLIENT` |
+| Log correlation | `JSONFormatter` + `LoggingInstrumentor` | — |
+
+`health` and `ready` are excluded: container health probes fire every few seconds
+and would otherwise dominate the trace volume.
+
+### The broker hop, and why it is hand-written
+
+No OpenTelemetry package instruments AMQP, and this system's central hop is
+AMQP. The implementation is four small functions in
+[`src/core/telemetry/propagation.py`](src/core/telemetry/propagation.py):
+
+1. `inject_trace_headers()` — serialises the active span into a W3C
+   `traceparent` header and writes it into the message headers **inside** the
+   `PRODUCER` span, so the header points at the publish and not at its caller.
+2. `extract_trace_context()` — reads it back and returns the parent `Context`.
+3. A custom `Getter`/`Setter` pair (`_AmqpHeaderGetter` / `_AmqpHeaderSetter`)
+   that normalises AMQP field tables: keys arrive as `str` *or* `bytes`, casing
+   is not guaranteed, and RabbitMQ represents some field-table types as a list.
+   The OTel `Getter` contract also requires `list[str] | None`, not a bare
+   string — the single most common way to write this by hand and silently lose
+   every trace.
+4. `current_trace_identifiers()` — a hex snapshot of the active context, used
+   for log correlation and the `X-Trace-Id` header.
+
+**Headers, not the message body.** The `DomainEvent` envelope is a deliberately
+small, language-neutral contract. Baking OpenTelemetry fields into it would
+couple every producer and consumer to this tracing library permanently. AMQP
+headers already exist, already carry transport metadata, and leave the payload
+untouched.
+
+**Failure is silent by design.** A message published before this change, or by a
+service with tracing off, has no `traceparent`. Extraction then returns an empty
+context and the consumer starts a fresh root trace. After a rolling deploy,
+queues legitimately contain both kinds of message, so "no parent is normal" is a
+first-class case — not an error path. A corrupt header behaves the same way
+rather than raising.
+
+### Retries
+
+A retry is a *new* AMQP delivery that re-enters the queue after a TTL, so it is a
+new span, not a continuation of the failed one. The consumer's republish is
+opened **inside** the failing attempt's span, so the retry chain stays inside
+the original trace instead of scattering across the DLQ views:
+
+![Captured retry trace](artifacts/trace-retry-waterfall.svg)
+
+```text
+POST /orders  [SERVER]    0.48ms  service=inventory-orders-api
+    ...
+    +-- inventory.orders.events publish  [PRODUCER]    0.14ms  service=inventory-orders-api
+        +-- orders.order-created.inventory process  [CONSUMER]    0.37ms  service=inventory-worker
+            +-- SELECT products  [CLIENT]    0.02ms  service=inventory-worker
+            +-- INSERT inventory_deduplication_log  [CLIENT]    0.01ms  service=inventory-worker
+        +-- orders.order-created.inventory process  [CONSUMER]    2.56ms  service=inventory-worker
+            +-- orders.order-created.inventory.retry.1 publish  [PRODUCER]    0.51ms  service=inventory-worker
+```
+
+The second delivery is a **sibling** of the first, not a child — that is
+honest, because nothing in the broker caused it. Its republish is a child of the
+attempt that failed, which is what keeps the chain in one place. Failing spans
+carry `error_type`, `will_retry` / `retries_exhausted`, and `dead_lettered`, so
+the DLQ story is readable from the trace alone.
+
+### Configuration
+
+All of it is env-driven, in `src/core/config.py`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OTEL_ENABLED` | `true` | Master switch. `false` installs nothing; every span call site becomes a no-op. |
+| `OTEL_SERVICE_NAME` | `inventory-orders-api` | Fallback only — each entrypoint passes its own. An explicit env value wins, so Compose can relabel a service. |
+| `OTEL_SERVICE_VERSION` | `0.7.0` | Reported as `service.version`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `None` | e.g. `http://jaeger:4317`. Unset means no exporter. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf`. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS` | `5` | Export timeout. |
+| `OTEL_CONSOLE_EXPORTER` | `false` | Print spans to stdout — useful with no collector. |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | See below. |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Ratio for the `*traceidratio` samplers. |
+| `OTEL_PROPAGATE_OVER_BROKER` | `true` | Write/read `traceparent` in AMQP headers. |
+
+Three design points worth calling out:
+
+- **Tracing is opt-out, not opt-in.** `OTEL_ENABLED=false` short-circuits
+  `init_tracing()`, and because the OTel API hands out `NoOpTracer` until a
+  provider is installed, every `start_as_current_span` call site degrades to a
+  no-op context manager. One branch to test, no per-call-site conditionals.
+- **No endpoint is not "no tracing".** With neither an endpoint nor the console
+  exporter, a real `TracerProvider` with a `Resource` is still installed, so ids
+  exist, the broker still propagates, and logs still carry `trace_id` — spans
+  are simply dropped at export time. This is what lets the test suite import
+  `src.main` without a collector running.
+- **Sampling is parent-based by default.** A worker continuing a trace the API
+  already sampled must never drop it for being "unsampled" locally, which is
+  exactly what a bare `traceidratio` sampler would do.
+
+### One process, one provider
+
+`init_tracing()` is called once per process, as early as possible, by all four
+entrypoints (`src/main.py`, `scripts/consume_orders.py`, `scripts/worker.py`,
+`scripts/read_projector.py`), and `shutdown_tracing()` runs on the way out — from
+the app's shutdown hook and from `atexit` — so the `BatchSpanProcessor` flushes
+instead of losing the last few seconds of a trace. Losing the tail of a trace
+because the process exited is the classic way to "not see" a span that really
+happened.
+
+The `SQLAlchemyInstrumentor` is attached to each engine at import time, which is
+why `init_tracing()` must run before the engine module is imported.
+
+### Log and response correlation
+
+Every JSON log line emitted inside a span carries `trace_id`, `span_id` and
+`trace_sampled`, read from the ambient context — so no call site has to pass
+anything extra:
+
+```json
+{"timestamp": "2026-09-28T06:48:54.183Z", "level": "INFO", "logger": "http.access",
+ "message": "http_request", "request_id": "6750ee4b-...", "method": "POST",
+ "path": "/orders", "status_code": 202, "duration_ms": 53.73,
+ "trace_id": "6b0f91caa8ccf74860bd578125b9c9cd",
+ "span_id": "dbd775c1fff06422", "trace_sampled": true}
+```
+
+Lines emitted outside a span (startup, shutdown, DLQ inspection) simply omit
+those keys rather than emitting nulls. Every response also carries an
+`X-Trace-Id` header, which is what lets you go from an API response — or a
+support ticket quoting one — straight to the trace in Jaeger. It is present on
+error responses too, since a failing request is exactly the one you need to
+look up.
+
+### Running it
+
+Docker Compose brings Jaeger up with the rest of the stack:
+
+```bash
+docker compose up -d
+# Jaeger UI:          http://localhost:16686
+# OTLP/gRPC receiver: jaeger:4317   (exposed on the host as 4317)
+# OTLP/HTTP receiver: jaeger:4318   (exposed on the host as 4318)
+```
+
+All four services ship with `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317` and
+their own `OTEL_SERVICE_NAME`, declared once via a YAML anchor so the four
+blocks cannot drift apart. Jaeger's `COLLECTOR_OTLP_ENABLED=true` is required —
+the all-in-one image has OTLP off by default.
+
+```bash
+# Jaeger UI -> Services -> pick "inventory-orders-api" -> Find Traces
+# or search by tag:  messaging.destination.name=orders.order-created.inventory
+# or by trace id copied from an X-Trace-Id response header
+```
+
+With no collector available, `OTEL_CONSOLE_EXPORTER=true` prints spans to stdout
+instead. Because the console exporter uses a `SimpleSpanProcessor` rather than a
+batch one, lines appear in emission order.
+
+**Loading a trace without a running stack.** `scripts/capture_trace.py` drives
+the real publisher and consumer classes (substituting only the aio-pika
+connection) and writes the result as OTLP JSON. Upload it to a running Jaeger
+via **Upload JSON**, or replay it against any OTLP collector:
+
+```bash
+python scripts/capture_trace.py                  # -> artifacts/trace.json + trace-tree.txt
+python scripts/capture_trace.py --with-retry     # also exercise the retry path
+python scripts/render_trace.py                   # -> artifacts/trace-waterfall.svg
+```
+
+`capture_trace.py` exits non-zero if the broker hop fails to propagate, so a
+broken trace cannot quietly become a committed artifact.
+
+<a id="trace-artifact"></a>
+### Trace artifact
+
+The two SVG waterfalls above are **not screenshots of the Jaeger UI** — they are
+rendered by `scripts/render_trace.py` from the OTLP JSON in `artifacts/`, which
+in turn came from the real instrumented code paths. They are committed so the
+documented example is reproducible and diffable without a Docker host. To see the
+same trace in Jaeger itself, run the stack and upload `artifacts/trace.json`
+(**Upload JSON** in the Jaeger UI), or generate a fresh one with
+`scripts/capture_trace.py` while the stack is up and read it in the UI.
+
+### Tests (`tests/telemetry/`, 102)
+
+| File | Covers |
+| --- | --- |
+| `test_setup.py` | Resource attributes, all sampler names, ratio parsing/clamping, exporter resolution, provider lifecycle and idempotency. |
+| `test_propagation.py` | Injection, extraction (case-insensitive, `bytes` keys, list values), the producer→consumer round trip, malformed and missing headers, and 15 parametrised unparseable-header cases. |
+| `test_end_to_end.py` | The real `RabbitMQEventPublisher` → `RabbitMQEventConsumer` path: one trace across the hop, span kinds, attribute survival, retries, retry exhaustion, permanent errors, undecodable envelopes, and untraced/legacy messages. |
+| `test_api_tracing.py` | HTTP through the ASGI app: `SERVER` span, CQRS nesting, DB spans, `X-Trace-Id`, inbound `traceparent` continuation, and log correlation via `JSONFormatter`. |
+| `test_capture_script.py` | The committed artifact: single trace, both services, correct parent/child wiring, well-formed ids, and the renderer's output. |
+
+The `spans` fixture attaches an `InMemorySpanExporter` to the already-installed
+provider rather than installing a second one — the OpenTelemetry API permits
+exactly one provider per process, and the FastAPI/SQLAlchemy instrumentations are
+already bound to it.
+
+- **Full test suite**: `pytest -q` — 274 passed, 0 failed (172 pre-existing, all
+  unchanged, + 102 new).
+- **Dependencies added:** `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-grpc`/
+  `-exporter-otlp-proto-http` `==1.44.0`; `opentelemetry-instrumentation-fastapi`/
+  `-sqlalchemy`/`-logging` `==0.65b0`. The instrumentation packages trail the SDK
+  by one minor release, so they are pinned to the newest version compatible with
+  SDK 1.44.0 rather than to the newest that exists.
+- **No new transitive dependencies on the request path**: tracing is initialised
+  once at startup, remote exporters are batched so a slow collector cannot add
+  latency to a request, and every instrumentation helper swallows its own
+  failures — a broken trace backend is a monitoring problem, not an availability
+  problem.
+
+### Week 10 — OpenTelemetry Distributed Tracing
+
+Full write-up above: [OpenTelemetry Distributed Tracing (Week 10)](#opentelemetry-distributed-tracing-week-10).
+In brief — OpenTelemetry SDK 1.44 instruments all four deployables
+(`inventory-orders-api`, `order-event-consumer`, `inventory-worker`,
+`read-projector`); Jaeger receives them over OTLP/gRPC from a new Compose
+service; the API → RabbitMQ → worker hop is stitched with W3C `traceparent`
+written into AMQP message headers, since no OTel package instruments AMQP;
+retries stay in the original trace; JSON logs and every response carry
+`trace_id`; and `scripts/capture_trace.py` regenerates a committed trace
+artifact. 102 new tests, 274 total.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -1192,5 +1471,5 @@ raw Redis primitives.
 - [x] CQRS: write side (commands) / read side (queries) split via in-process CqrsBus, write-optimized write DB + read-optimized projection `orders_read_orders` + 127 tests (Week 7)
 - [x] CQRS read phase: dedicated read store (Elasticsearch in compose, in-memory in dev/test), async read-projector consumer group as the only read-store writer, query handlers reading exclusively from the read store, eventual-consistency + projector tests, read-latency benchmark + 140 tests (Week 8)
 - [x] Redis-backed token bucket rate limiter (from scratch, no library): atomic Lua backend, per-role tiers, graceful degradation + in-memory fallback, 429 envelope + headers, Redis via Docker Compose, concurrency load test + 172 tests (Week 9)
-- [ ] OpenTelemetry distributed tracing (Jaeger/Zipkin)
+- [x] OpenTelemetry distributed tracing: W3C propagation over AMQP headers, Jaeger via OTLP/gRPC, trace-correlated JSON logs, `X-Trace-Id`, committed trace artifact + 274 tests (Week 10)
 - [ ] Chaos engineering resilience tests

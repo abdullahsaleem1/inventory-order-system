@@ -15,6 +15,12 @@ The worker reuses the shared RabbitMQEventConsumer, which provides:
 
 Graceful shutdown on SIGINT/SIGTERM: stops consuming, drains in-flight
 messages, closes the broker connection.
+
+Week 10 — tracing. The worker calls `init_tracing("inventory-worker")` before
+importing anything that talks to the database, so the stock deduction it
+performs shows up inside the same trace as the API request that created the
+order: the CONSUMER span re-parents itself onto the `traceparent` carried in
+the message headers, and every SELECT/UPDATE it issues hangs off that.
 """
 import argparse
 import asyncio
@@ -22,13 +28,22 @@ import signal
 
 from src.core.config import get_settings
 from src.core.logging_config import configure_logging, get_logger
+from src.core.telemetry import init_tracing, shutdown_tracing
 from src.contexts.inventory.services.order_event_handler import DeductInventoryHandler
 from src.shared.infrastructure.database import AsyncSessionLocal
 from src.shared.messaging.consumer import QueueGroupSpec, RabbitMQEventConsumer
 from src.shared.messaging.events import DomainEvent
 
 configure_logging()
+
+# Before the database engine is imported: `database.py` instruments its engine
+# at import time and must bind to the provider this call installs.
+init_tracing("inventory-worker")
+
 logger = get_logger("worker.main")
+
+# Matches OTEL_SERVICE_NAME in docker-compose.yml; Jaeger groups by this.
+SERVICE_NAME = "inventory-worker"
 
 
 class RequeueDlqHandler:
@@ -123,6 +138,7 @@ async def run_worker() -> None:
     )
     await stop.wait()
     await consumer.stop()
+    logger.info("worker_stopped", extra={"group": group.name, "queue": group.queue_name})
 
 
 async def main() -> None:
@@ -130,12 +146,16 @@ async def main() -> None:
     parser.add_argument("--drain-dlq", action="store_true", help="log+ack all messages in the worker DLQ and exit")
     args = parser.parse_args()
 
-    if args.drain_dlq:
-        drained = await drain_dlq()
-        logger.info("worker_dlq_drained", extra={"messages": drained})
-        return
+    try:
+        if args.drain_dlq:
+            drained = await drain_dlq()
+            logger.info("worker_dlq_drained", extra={"messages": drained})
+            return
 
-    await run_worker()
+        await run_worker()
+    finally:
+        # Flush before the process exits; the DLQ-drain tool emits spans too.
+        shutdown_tracing()
 
 
 if __name__ == "__main__":

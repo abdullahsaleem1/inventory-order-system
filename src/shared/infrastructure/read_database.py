@@ -22,6 +22,7 @@ from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.core.config import get_settings
+from src.core.telemetry import instrument_engine
 from src.shared.infrastructure.database import AsyncSessionLocal
 
 settings = get_settings()
@@ -38,6 +39,7 @@ def get_read_session_factory() -> async_sessionmaker[AsyncSession] | None:
         read_url = (settings.READ_DATABASE_URL or "").strip()
         if read_url:
             _read_engine = create_async_engine(read_url, echo=settings.DEBUG, future=True)
+            instrument_engine(_read_engine, name="read-model")
             _read_session_factory = async_sessionmaker(
                 bind=_read_engine, expire_on_commit=False, class_=AsyncSession
             )

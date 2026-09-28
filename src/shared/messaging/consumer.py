@@ -29,6 +29,25 @@ Delivery semantics:
 Every lifecycle stage is logged as structured JSON:
 event_receive_started -> event_retry_scheduled | event_ack | event_nack |
 event_dead_lettered.
+
+Week 10 — tracing. `_make_on_message()` is the single choke point every
+delivered message passes through, so it is where the CONSUMER span is created.
+The W3C `traceparent` written by the publisher (see `publisher.py`) is read back
+out of the AMQP headers and used as the *parent* context, which is what stitches
+this worker's spans into the API's trace instead of leaving them as orphans:
+
+    API  POST /orders            (SERVER)
+     └─ inventory.orders.events publish  (PRODUCER)  ── traceparent ──┐
+                                                                    │
+    worker  orders.order-created.inventory process (CONSUMER) ◄──────┘
+            ├─ SELECT/INSERT …      (CLIENT, db.*)
+            └─ stock_deducted
+
+Retries need care. A retry is a *new* AMQP delivery that re-enters the queue
+after a TTL, so it is a new span, not a continuation of the failed one. Each
+attempt's span records the previous attempt's span context, which keeps the
+retry history in one place without claiming a parent-child relationship that
+did not happen.
 """
 import asyncio
 import time
@@ -40,6 +59,15 @@ from aio_pika import DeliveryMode, Message
 
 from src.core.config import get_settings
 from src.core.logging_config import get_logger
+from src.core.telemetry import (
+    CONSUMER,
+    PRODUCER,
+    StatusCode,
+    extract_trace_context,
+    get_tracer,
+    inject_trace_headers,
+    set_span_attributes,
+)
 from src.shared.messaging.events import DomainEvent, MessageDecodeError
 
 
@@ -82,6 +110,7 @@ class RabbitMQEventConsumer:
         self._backoff_base = backoff_base_seconds
         self._backoff_max = backoff_max_seconds
         self._logger = get_logger("messaging.consumer")
+        self._tracer = get_tracer()
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._consume_tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
@@ -197,19 +226,42 @@ class RabbitMQEventConsumer:
                 "error": str(error),
             },
         )
-        retry_message = Message(
-            body=message.body,
-            message_id=message.message_id,
-            correlation_id=message.correlation_id,
-            type=event.event_type,
-            content_type="application/json",
-            delivery_mode=DeliveryMode.PERSISTENT,
-            expiration=str(delay_ms),  # TTL before the retry queue dead-letters it
-            headers={**headers, "x-retry-count": attempt},
-        )
-        await spec.retry_queues[attempt].channel.default_exchange.publish(
-            retry_message, routing_key=str(spec.retry_queues[attempt].name)
-        )
+        retry_queue = spec.retry_queues[attempt]
+        with self._tracer.start_as_current_span(
+            f"{retry_queue.name} publish",
+            kind=PRODUCER,
+            attributes={
+                "messaging.system": "rabbitmq",
+                "messaging.operation.name": "publish",
+                "messaging.operation.type": "send",
+                "messaging.destination.name": retry_queue.name,
+                "messaging.message.id": log_common.get("message_id"),
+                "messaging.retry.attempt": attempt,
+                "messaging.retry.delay_ms": delay_ms,
+            },
+        ) as span:
+            span.set_status(StatusCode.ERROR, str(error))
+            span.record_exception(error)
+            set_span_attributes(span, error_type=type(error).__name__)
+
+            # Re-inject inside this span: the redelivery's traceparent points at
+            # the republish, which is a child of the attempt that failed. The
+            # whole retry chain therefore stays inside the original trace rather
+            # than scattering orphan traces across the DLQ views.
+            retry_headers = inject_trace_headers({**headers, "x-retry-count": attempt})
+            retry_message = Message(
+                body=message.body,
+                message_id=message.message_id,
+                correlation_id=message.correlation_id,
+                type=event.event_type,
+                content_type="application/json",
+                delivery_mode=DeliveryMode.PERSISTENT,
+                expiration=str(delay_ms),  # TTL before the retry queue dead-letters it
+                headers=retry_headers,
+            )
+            await retry_queue.channel.default_exchange.publish(
+                retry_message, routing_key=str(retry_queue.name)
+            )
         await message.ack()  # original consumed; retry copy parked for backoff
 
     def _make_on_message(self, spec: QueueGroupSpec):
@@ -224,47 +276,116 @@ class RabbitMQEventConsumer:
                 "redelivered": message.redelivered,
                 "routing_key": message.routing_key,
             }
-            self._logger.info("event_receive_started", extra=log_common)
 
-            try:
-                event = DomainEvent.from_json(message.body)
-            except MessageDecodeError as exc:
-                self._logger.exception(
-                    "event_nack",
-                    extra={**log_common, "reason": f"decode_error: {exc}", "retryable": False},
-                )
-                await message.reject(requeue=False)  # straight to DLQ
-                self._logger.info("event_dead_lettered", extra={**log_common, "reason": str(exc)})
-                return
-
-            log_common["event_id"] = str(event.event_id)
-            log_common["event_type"] = event.event_type
-            log_common["correlation_id"] = event.correlation_id
-
-            try:
-                await spec.handler(event)
-            except PermanentMessageError as exc:
-                self._logger.exception(
-                    "event_nack",
-                    extra={**log_common, "reason": f"permanent_error: {exc}", "retryable": False},
-                )
-                await message.reject(requeue=False)
-                self._logger.info("event_dead_lettered", extra={**log_common, "reason": str(exc)})
-                return
-            except Exception as exc:  # transient — exponential backoff then DLQ
-                if attempt >= self._max_retries:
-                    reason = f"retries_exhausted ({self._max_retries}): {exc}"
-                    self._logger.exception(
-                        "event_nack", extra={**log_common, "reason": reason, "retryable": False}
-                    )
-                    await message.reject(requeue=False)
-                    self._logger.info("event_dead_lettered", extra={**log_common, "reason": reason})
-                    return
-                await self._schedule_retry(spec, message, event, headers, attempt + 1, exc, log_common)
-                return
-
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            await message.ack()
-            self._logger.info("event_ack", extra={**log_common, "duration_ms": duration_ms})
+            # The publisher's traceparent (if any) becomes this span's parent.
+            # No traceparent -> empty context -> this span is a new root trace,
+            # which is correct for messages that predate instrumentation.
+            parent_context = extract_trace_context(headers)
+            with self._tracer.start_as_current_span(
+                f"{spec.queue_name} process",
+                context=parent_context,
+                kind=CONSUMER,
+                attributes={
+                    "messaging.system": "rabbitmq",
+                    "messaging.operation.name": "process",
+                    "messaging.operation.type": "process",
+                    "messaging.destination.name": spec.queue_name,
+                    "messaging.consumer.group.name": spec.name,
+                    "messaging.message.id": message.message_id,
+                    "messaging.message.redelivered": message.redelivered,
+                    "messaging.rabbitmq.routing_key": message.routing_key,
+                    "messaging.retry.attempt": attempt + 1,
+                    "messaging.retry.max": self._max_retries,
+                },
+            ) as span:
+                await self._handle_message(spec, message, headers, attempt, log_common, started, span)
 
         return on_message
+
+    async def _handle_message(
+        self,
+        spec: QueueGroupSpec,
+        message: aio_pika.IncomingMessage,
+        headers: dict[str, Any],
+        attempt: int,
+        log_common: dict[str, Any],
+        started: float,
+        span: Any,
+    ) -> None:
+        """Decode, dispatch to the handler, and ack/retry/reject.
+
+        Split out of `_make_on_message`'s closure so the whole delivery can run
+        inside one `with` block — a context manager that spans a closure body
+        is easy to get subtly wrong when edited, and this keeps the span
+        boundary obvious.
+        """
+        self._logger.info("event_receive_started", extra=log_common)
+
+        try:
+            event = DomainEvent.from_json(message.body)
+        except MessageDecodeError as exc:
+            span.set_status(StatusCode.ERROR, f"decode_error: {exc}")
+            span.record_exception(exc)
+            set_span_attributes(span, error_type=type(exc).__name__, dead_lettered=True)
+            self._logger.exception(
+                "event_nack",
+                extra={**log_common, "reason": f"decode_error: {exc}", "retryable": False},
+            )
+            await message.reject(requeue=False)  # straight to DLQ
+            self._logger.info("event_dead_lettered", extra={**log_common, "reason": str(exc)})
+            return
+
+        log_common["event_id"] = str(event.event_id)
+        log_common["event_type"] = event.event_type
+        log_common["correlation_id"] = event.correlation_id
+        set_span_attributes(
+            span,
+            **{"event.type": event.event_type, "event.id": str(event.event_id)},
+        )
+
+        try:
+            await spec.handler(event)
+        except PermanentMessageError as exc:
+            span.set_status(StatusCode.ERROR, f"permanent_error: {exc}")
+            span.record_exception(exc)
+            set_span_attributes(span, error_type=type(exc).__name__, dead_lettered=True)
+            self._logger.exception(
+                "event_nack",
+                extra={**log_common, "reason": f"permanent_error: {exc}", "retryable": False},
+            )
+            await message.reject(requeue=False)
+            self._logger.info("event_dead_lettered", extra={**log_common, "reason": str(exc)})
+            return
+        except Exception as exc:  # transient — exponential backoff then DLQ
+            if attempt >= self._max_retries:
+                reason = f"retries_exhausted ({self._max_retries}): {exc}"
+                span.set_status(StatusCode.ERROR, reason)
+                span.record_exception(exc)
+                set_span_attributes(
+                    span,
+                    error_type=type(exc).__name__,
+                    dead_lettered=True,
+                    retries_exhausted=True,
+                )
+                self._logger.exception(
+                    "event_nack", extra={**log_common, "reason": reason, "retryable": False}
+                )
+                await message.reject(requeue=False)
+                self._logger.info("event_dead_lettered", extra={**log_common, "reason": reason})
+                return
+            set_span_attributes(
+                span,
+                error_type=type(exc).__name__,
+                will_retry=True,
+                next_retry_delay_seconds=round(self._backoff_seconds(attempt + 1), 3),
+            )
+            span.set_status(StatusCode.ERROR, str(exc))
+            span.record_exception(exc)
+            await self._schedule_retry(spec, message, event, headers, attempt + 1, exc, log_common)
+            return
+
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        set_span_attributes(span, duration_ms=duration_ms)
+        span.set_status(StatusCode.OK)
+        await message.ack()
+        self._logger.info("event_ack", extra={**log_common, "duration_ms": duration_ms})

@@ -1,0 +1,893 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "inventory-orders",
+            "version": "0.7.0"
+          },
+          "spans": [
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "cd71805f93e3f5c3",
+              "name": "POST /orders",
+              "kind": 2,
+              "startTimeUnixNano": "1790578441904532800",
+              "endTimeUnixNano": "1790578441905065700",
+              "attributes": [
+                {
+                  "key": "http.request.method",
+                  "value": {
+                    "stringValue": "POST"
+                  }
+                },
+                {
+                  "key": "http.route",
+                  "value": {
+                    "stringValue": "/orders"
+                  }
+                },
+                {
+                  "key": "http.scheme",
+                  "value": {
+                    "stringValue": "http"
+                  }
+                },
+                {
+                  "key": "http.status_code",
+                  "value": {
+                    "stringValue": "202"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "stringValue": "202"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              },
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-orders-api-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "fe5f06599fba1dd6",
+              "name": "jwt.verify",
+              "kind": 1,
+              "startTimeUnixNano": "1790578441904611700",
+              "endTimeUnixNano": "1790578441904631800",
+              "attributes": [],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "cd71805f93e3f5c3",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-orders-api-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "cd7c67779b5f0c3b",
+              "name": "command CreateOrderCommand",
+              "kind": 1,
+              "startTimeUnixNano": "1790578441904681600",
+              "endTimeUnixNano": "1790578441905049600",
+              "attributes": [
+                {
+                  "key": "cqrs.command",
+                  "value": {
+                    "stringValue": "CreateOrderCommand"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "cd71805f93e3f5c3",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-orders-api-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "6df62c930d908484",
+              "name": "INSERT orders",
+              "kind": 3,
+              "startTimeUnixNano": "1790578441904728200",
+              "endTimeUnixNano": "1790578441904763700",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "postgresql"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "INSERT"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "cd7c67779b5f0c3b",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-orders-api-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "9cdb322e7c755bd2",
+              "name": "inventory.orders.events publish",
+              "kind": 4,
+              "startTimeUnixNano": "1790578441904881700",
+              "endTimeUnixNano": "1790578441905034700",
+              "attributes": [
+                {
+                  "key": "messaging.system",
+                  "value": {
+                    "stringValue": "rabbitmq"
+                  }
+                },
+                {
+                  "key": "messaging.operation.name",
+                  "value": {
+                    "stringValue": "publish"
+                  }
+                },
+                {
+                  "key": "messaging.operation.type",
+                  "value": {
+                    "stringValue": "send"
+                  }
+                },
+                {
+                  "key": "messaging.destination.name",
+                  "value": {
+                    "stringValue": "inventory.orders.events"
+                  }
+                },
+                {
+                  "key": "messaging.destination.routing_key",
+                  "value": {
+                    "stringValue": "order.created"
+                  }
+                },
+                {
+                  "key": "messaging.message.id",
+                  "value": {
+                    "stringValue": "22eed361-d1a2-4f45-a676-cc803cbd42d1"
+                  }
+                },
+                {
+                  "key": "messaging.message.body.size",
+                  "value": {
+                    "stringValue": "444"
+                  }
+                },
+                {
+                  "key": "event.type",
+                  "value": {
+                    "stringValue": "order.created"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "0.23"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              },
+              "parentSpanId": "cd7c67779b5f0c3b",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-orders-api-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-orders-api"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "09b38290d76628a3",
+              "name": "orders.order-created.inventory process",
+              "kind": 5,
+              "startTimeUnixNano": "1790578441906313900",
+              "endTimeUnixNano": "1790578441906541600",
+              "attributes": [
+                {
+                  "key": "messaging.system",
+                  "value": {
+                    "stringValue": "rabbitmq"
+                  }
+                },
+                {
+                  "key": "messaging.operation.name",
+                  "value": {
+                    "stringValue": "process"
+                  }
+                },
+                {
+                  "key": "messaging.operation.type",
+                  "value": {
+                    "stringValue": "process"
+                  }
+                },
+                {
+                  "key": "messaging.destination.name",
+                  "value": {
+                    "stringValue": "orders.order-created.inventory"
+                  }
+                },
+                {
+                  "key": "messaging.consumer.group.name",
+                  "value": {
+                    "stringValue": "inventory"
+                  }
+                },
+                {
+                  "key": "messaging.message.id",
+                  "value": {
+                    "stringValue": "22eed361-d1a2-4f45-a676-cc803cbd42d1"
+                  }
+                },
+                {
+                  "key": "messaging.message.redelivered",
+                  "value": {
+                    "stringValue": "False"
+                  }
+                },
+                {
+                  "key": "messaging.rabbitmq.routing_key",
+                  "value": {
+                    "stringValue": "order.created"
+                  }
+                },
+                {
+                  "key": "messaging.retry.attempt",
+                  "value": {
+                    "stringValue": "1"
+                  }
+                },
+                {
+                  "key": "messaging.retry.max",
+                  "value": {
+                    "stringValue": "3"
+                  }
+                },
+                {
+                  "key": "event.type",
+                  "value": {
+                    "stringValue": "order.created"
+                  }
+                },
+                {
+                  "key": "event.id",
+                  "value": {
+                    "stringValue": "22eed361-d1a2-4f45-a676-cc803cbd42d1"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "stringValue": "0.32"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              },
+              "parentSpanId": "9cdb322e7c755bd2",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-worker-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "981e09a07c47e9d7",
+              "name": "SELECT products",
+              "kind": 3,
+              "startTimeUnixNano": "1790578441906448200",
+              "endTimeUnixNano": "1790578441906461900",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "postgresql"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "SELECT"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "09b38290d76628a3",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-worker-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "traceId": "f95cf3f2f14ceb79abf0eca4afa9d1e3",
+              "spanId": "fba4a5361182ce7e",
+              "name": "INSERT inventory_deduplication_log",
+              "kind": 3,
+              "startTimeUnixNano": "1790578441906502600",
+              "endTimeUnixNano": "1790578441906510200",
+              "attributes": [
+                {
+                  "key": "db.system",
+                  "value": {
+                    "stringValue": "postgresql"
+                  }
+                },
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "stringValue": "INSERT"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "09b38290d76628a3",
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "telemetry.sdk.language",
+                    "value": {
+                      "stringValue": "python"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.name",
+                    "value": {
+                      "stringValue": "opentelemetry"
+                    }
+                  },
+                  {
+                    "key": "telemetry.sdk.version",
+                    "value": {
+                      "stringValue": "1.44.0"
+                    }
+                  },
+                  {
+                    "key": "service.instance.id",
+                    "value": {
+                      "stringValue": "inventory-worker-DESKTOP-KV32HP5-11012"
+                    }
+                  },
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "service.version",
+                    "value": {
+                      "stringValue": "0.7.0"
+                    }
+                  },
+                  {
+                    "key": "service.namespace",
+                    "value": {
+                      "stringValue": "Inventory & Order Management System"
+                    }
+                  },
+                  {
+                    "key": "deployment.environment.name",
+                    "value": {
+                      "stringValue": "development"
+                    }
+                  },
+                  {
+                    "key": "process.pid",
+                    "value": {
+                      "stringValue": "11012"
+                    }
+                  },
+                  {
+                    "key": "app.service",
+                    "value": {
+                      "stringValue": "inventory-worker"
+                    }
+                  },
+                  {
+                    "key": "app.component",
+                    "value": {
+                      "stringValue": "bounded-contexts:identity,inventory,orders"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -23,12 +23,21 @@ Rules enforced at dispatch time:
 * every command type has exactly one registered handler,
 * every query type has exactly one registered handler,
 * dispatching an unregistered message raises `CqrsMessageError`.
+
+Week 10 added tracing: `dispatch_command` / `dispatch_query` each open an
+`INTERNAL` span named after the message type. That turns the mediator into a
+natural seam — every use case gets a labelled node in the trace between the HTTP
+server span and the database spans, which is what makes a trace readable
+("CreateOrder took 4ms, and the 3ms of it was this query") without any
+per-handler boilerplate.
 """
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, TypeVar
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+
+from src.core.telemetry import INTERNAL, StatusCode, get_tracer, set_span_attributes
 
 TMessage = TypeVar("TMessage")
 TResult = TypeVar("TResult")
@@ -67,6 +76,7 @@ class CqrsBus:
     def __init__(self) -> None:
         self._command_handlers: dict[type, Any] = {}
         self._query_handlers: dict[type, Any] = {}
+        self._tracer = get_tracer()
 
     # -- registration --------------------------------------------------------
 
@@ -95,10 +105,58 @@ class CqrsBus:
         call = self._command_handlers.get(type(command))
         if call is None:
             raise CqrsMessageError(f"No command handler registered for {type(command).__name__}")
-        return await call(command)
+        return await self._dispatch("command", type(command).__name__, command, call)
 
     async def dispatch_query(self, query: Query) -> TResult:
         call = self._query_handlers.get(type(query))
         if call is None:
             raise CqrsMessageError(f"No query handler registered for {type(query).__name__}")
-        return await call(query)
+        return await self._dispatch("query", type(query).__name__, query, call)
+
+    async def _dispatch(
+        self, kind: str, name: str, message: Command | Query, call: Any
+    ) -> TResult:
+        """Run one handler inside a span labelled with the message type.
+
+        Attribute keys are namespaced `cqrs.*` and kept scalar, because these
+        messages are frozen dataclasses whose fields vary per use case (some
+        carry customer ids, some carry JWT claims) and unbounded attribute
+        growth is the fastest way to make a trace backend expensive.
+        """
+        with self._tracer.start_as_current_span(
+            f"{kind} {name}",
+            kind=INTERNAL,
+            attributes={
+                "cqrs.kind": kind,
+                "cqrs.message_type": name,
+                "cqrs.handler": getattr(call, "__qualname__", type(call).__name__),
+            },
+        ) as span:
+            set_span_attributes(span, **_identifying_attributes(message))
+            try:
+                result = await call(message)
+            except Exception as exc:
+                span.set_status(StatusCode.ERROR, str(exc))
+                span.record_exception(exc)
+                set_span_attributes(span, error_type=type(exc).__name__)
+                raise
+            span.set_status(StatusCode.OK)
+            return result
+
+
+def _identifying_attributes(message: Any) -> dict[str, Any]:
+    """Pick the handful of message fields worth putting on the span.
+
+    Deliberately a fixed allow-list rather than "all fields": message payloads
+    are free-form per use case and can contain personal data.
+    """
+    try:
+        available = {field.name for field in fields(message)}
+    except TypeError:  # not a dataclass
+        return {}
+    interesting = ("order_id", "customer_id", "product_id", "sku", "status", "reason")
+    return {
+        f"cqrs.{name}": str(getattr(message, name))
+        for name in interesting
+        if name in available and getattr(message, name, None) is not None
+    }

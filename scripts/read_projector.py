@@ -22,6 +22,13 @@ messages -> `orders.order-created.read.dlq`).
 
 Graceful shutdown on SIGINT/SIGTERM: stops consuming, drains in-flight
 messages, closes the broker connection.
+
+Week 10 — tracing. `init_tracing("read-projector")` makes this worker's
+Elasticsearch upserts visible inside the trace of the request that caused them.
+The CONSUMER span re-parents onto the `traceparent` carried in the message
+headers, and each `elasticsearch index` CLIENT span hangs off that — so a slow
+read-store write is immediately attributable to the `POST /orders` (or
+`POST /orders/{id}/confirm`) that triggered it.
 """
 import argparse
 import asyncio
@@ -29,12 +36,14 @@ import signal
 
 from src.core.config import get_settings
 from src.core.logging_config import configure_logging, get_logger
+from src.core.telemetry import init_tracing, instrument_read_store, shutdown_tracing
 from src.contexts.orders.services.read_model_projector import ProjectOrderToReadStoreHandler
 from src.shared.messaging.consumer import QueueGroupSpec, RabbitMQEventConsumer
 from src.shared.messaging.events import DomainEvent
 from src.shared.readstore import build_read_store
 
 configure_logging()
+init_tracing("read-projector")
 logger = get_logger("read_projector.main")
 
 
@@ -50,6 +59,9 @@ class DlvInspectionHandler:
 
 def build_projector_group() -> QueueGroupSpec:
     settings = get_settings()
+    # Client spans for the read store are hand-written; this is the marker that
+    # says so in the logs alongside the real auto-instrumented layers.
+    instrument_read_store()
     read_store = build_read_store()
     return QueueGroupSpec(
         name="read",
@@ -139,6 +151,7 @@ async def run_projector() -> None:
     )
     await stop.wait()
     await consumer.stop()
+    logger.info("read_projector_stopped", extra={"group": group.name, "queue": group.queue_name})
 
 
 async def main() -> None:
@@ -148,12 +161,15 @@ async def main() -> None:
     parser.add_argument("--drain-dlq", action="store_true", help="log+ack all messages in the read projector DLQ and exit")
     args = parser.parse_args()
 
-    if args.drain_dlq:
-        drained = await drain_dlq()
-        logger.info("read_projector_dlq_drained", extra={"messages": drained})
-        return
+    try:
+        if args.drain_dlq:
+            drained = await drain_dlq()
+            logger.info("read_projector_dlq_drained", extra={"messages": drained})
+            return
 
-    await run_projector()
+        await run_projector()
+    finally:
+        shutdown_tracing()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,19 @@ Each consumer group is its own durable queue bound to the
 
 Graceful shutdown on SIGINT/SIGTERM: stops consuming, drains in-flight
 messages, closes the broker connection.
+
+Week 10 — tracing. `init_tracing("order-event-consumer")` installs the provider
+before the database engine is imported, so the writes this consumer performs
+appear inside the trace of the `POST /orders` request that triggered them — the
+CONSUMER span picks up the `traceparent` from the message headers and the `db.*`
+spans hang off it.
+
+One service name covers both `--group persistence` and `--group audit`; the
+group is recorded per span as `messaging.consumer.group.name` instead. A single
+TracerProvider per process is not negotiable (the SQLAlchemy instrumentation
+binds to whichever provider is current when the engine is created), so the
+service is fixed at import time and relabelled per deployment via
+`OTEL_SERVICE_NAME` if a distinct Jaeger service is wanted.
 """
 import argparse
 import asyncio
@@ -27,12 +40,14 @@ import signal
 
 from src.core.config import get_settings
 from src.core.logging_config import configure_logging, get_logger
+from src.core.telemetry import init_tracing, shutdown_tracing
 from src.contexts.orders.services.order_event_handler import PersistOrderCreatedHandler
 from src.shared.infrastructure.database import AsyncSessionLocal
 from src.shared.messaging.consumer import QueueGroupSpec, RabbitMQEventConsumer
 from src.shared.messaging.events import DomainEvent
 
 configure_logging()
+init_tracing("order-event-consumer")
 logger = get_logger("consumer.main")
 
 
@@ -150,12 +165,15 @@ async def main() -> None:
     parser.add_argument("--drain-dlq", metavar="GROUP", help="log+ack all messages in GROUP's dead-letter queue and exit")
     args = parser.parse_args()
 
-    if args.drain_dlq:
-        drained = await drain_dlq(args.drain_dlq)
-        logger.info("dlq_drained", extra={"group": args.drain_dlq, "messages": drained})
-        return
+    try:
+        if args.drain_dlq:
+            drained = await drain_dlq(args.drain_dlq)
+            logger.info("dlq_drained", extra={"group": args.drain_dlq, "messages": drained})
+            return
 
-    await run_consumer(args.group)
+        await run_consumer(args.group)
+    finally:
+        shutdown_tracing()
 
 
 if __name__ == "__main__":

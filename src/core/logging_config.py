@@ -5,6 +5,12 @@ Every log line is a single JSON object, making logs directly queryable by
 log aggregators (ELK, Loki, CloudWatch Insights, etc.) instead of relying on
 regex-parsed plaintext. Nothing in this codebase should use print() or the
 bare logging string format — always go through get_logger().
+
+Week 10 added `trace_id` / `span_id` / `trace_sampled` to every line. Those are
+read from the ambient OpenTelemetry context, so a log line can be pivoted to its
+span in Jaeger and vice versa without any call site having to pass anything
+extra. Lines emitted outside a span (startup, shutdown, the DLQ inspection
+tools) simply have no such keys rather than nulls.
 """
 import json
 import logging
@@ -24,6 +30,21 @@ _RESERVED_RECORD_ATTRS = {
 }
 
 
+def _trace_fields() -> dict[str, Any]:
+    """Active trace/span ids, or {} when no span is recording.
+
+    Imported lazily and defensively: logging is initialised before tracing (and
+    in processes that never turn tracing on), so this must never be the reason
+    a service fails to boot.
+    """
+    try:
+        from src.core.telemetry.propagation import current_trace_identifiers
+
+        return current_trace_identifiers().as_log_fields()
+    except Exception:  # pragma: no cover - telemetry unavailable/misconfigured
+        return {}
+
+
 class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -37,6 +58,11 @@ class JSONFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key not in _RESERVED_RECORD_ATTRS and not key.startswith("_"):
                 payload[key] = value
+
+        # Trace correlation. `setdefault` so an explicit extra={"trace_id": ...}
+        # in a call site still wins.
+        for key, value in _trace_fields().items():
+            payload.setdefault(key, value)
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)

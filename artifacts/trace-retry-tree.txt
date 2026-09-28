@@ -1,0 +1,10 @@
+POST /orders  [SERVER]    0.45ms  service=inventory-orders-api
+    +-- jwt.verify  [INTERNAL]    0.02ms  service=inventory-orders-api
+    +-- command CreateOrderCommand  [INTERNAL]    0.32ms  service=inventory-orders-api
+        +-- INSERT orders  [CLIENT]    0.05ms  service=inventory-orders-api
+        +-- inventory.orders.events publish  [PRODUCER]    0.12ms  service=inventory-orders-api
+            +-- orders.order-created.inventory process  [CONSUMER]    0.16ms  service=inventory-worker
+                +-- SELECT products  [CLIENT]    0.01ms  service=inventory-worker
+                +-- INSERT inventory_deduplication_log  [CLIENT]    0.01ms  service=inventory-worker
+            +-- orders.order-created.inventory process  [CONSUMER]    1.86ms  service=inventory-worker
+                +-- orders.order-created.inventory.retry.1 publish  [PRODUCER]    0.45ms  service=inventory-worker

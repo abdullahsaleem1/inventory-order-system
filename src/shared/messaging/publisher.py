@@ -11,8 +11,16 @@ Event publishing over RabbitMQ.
       (`event_publish_started` / `event_publish_succeeded` /
       `event_publish_failed`).
 - InMemoryEventPublisher — test double: records every event and optionally
-  forwards it to inline "subscriber" handlers, simulating immediate delivery.
+    forwards it to inline "subscriber" handlers, simulating immediate delivery.
+
+Week 10 — tracing. `publish()` opens a `PRODUCER` span named
+`<exchange> publish <routing_key>` and stamps the W3C `traceparent` into the
+AMQP message headers before the message leaves the process. That single header
+is what lets Jaeger draw the consumer's spans as children of the API request
+that caused them, even though the work happens minutes later in a different
+container. See `src/core/telemetry/propagation.py`.
 """
+import inspect
 import time
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -21,6 +29,13 @@ from aio_pika import DeliveryMode, Message
 
 from src.core.config import get_settings
 from src.core.logging_config import get_logger
+from src.core.telemetry import (
+    PRODUCER,
+    StatusCode,
+    get_tracer,
+    inject_trace_headers,
+    set_span_attributes,
+)
 from src.shared.messaging.events import DomainEvent
 
 
@@ -47,6 +62,7 @@ class RabbitMQEventPublisher:
             "order.status.changed": settings.ORDER_STATUS_CHANGED_ROUTING_KEY,
         }
         self._logger = get_logger("messaging.publisher")
+        self._tracer = get_tracer()
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractRobustChannel | None = None
         self._exchange: aio_pika.abc.AbstractRobustExchange | None = None
@@ -78,35 +94,66 @@ class RabbitMQEventPublisher:
 
     async def publish(self, event: DomainEvent) -> None:
         started = time.perf_counter()
+        routing_key = self._routing_key_for(event.event_type)
         log_common: dict[str, Any] = {
             "event_id": str(event.event_id),
             "event_type": event.event_type,
             "correlation_id": event.correlation_id,
         }
-        self._logger.info("event_publish_started", extra=log_common)
-        try:
-            exchange = await self._ensure_exchange()
-            message = Message(
-                body=event.to_json(),
-                message_id=str(event.event_id),
-                correlation_id=event.correlation_id,
-                type=event.event_type,
-                timestamp=event.occurred_at,
-                content_type="application/json",
-                delivery_mode=DeliveryMode.PERSISTENT,  # survive broker restart
-                headers={"x-event-version": 1},
-            )
-            # Raises on nack/timeout because confirm_delivery() is enabled.
-            await exchange.publish(message, routing_key=self._routing_key_for(event.event_type), timeout=10)
-        except Exception as exc:
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            self._logger.exception(
-                "event_publish_failed",
-                extra={**log_common, "duration_ms": duration_ms, "error_type": type(exc).__name__},
-            )
-            raise EventPublishError(f"Failed to publish event {event.event_id}: {exc}") from exc
 
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        # Span name follows the OpenTelemetry messaging convention
+        # "<destination> publish", which is what makes the producer side
+        # recognisable at a glance in the Jaeger span list.
+        with self._tracer.start_as_current_span(
+            f"{self._exchange_name} publish",
+            kind=PRODUCER,
+            attributes={
+                "messaging.system": "rabbitmq",
+                "messaging.operation.name": "publish",
+                "messaging.operation.type": "send",
+                "messaging.destination.name": self._exchange_name,
+                "messaging.destination.routing_key": routing_key,
+                "messaging.message.id": str(event.event_id),
+                "messaging.message.body.size": len(event.to_json()),
+                "event.type": event.event_type,
+            },
+        ) as span:
+            self._logger.info("event_publish_started", extra=log_common)
+            try:
+                exchange = await self._ensure_exchange()
+                # Inject INSIDE the span so the injected traceparent points at
+                # the producer span, not the caller. Headers already carry
+                # x-event-version; injection is additive.
+                headers = inject_trace_headers({"x-event-version": 1})
+                message = Message(
+                    body=event.to_json(),
+                    message_id=str(event.event_id),
+                    correlation_id=event.correlation_id,
+                    type=event.event_type,
+                    timestamp=event.occurred_at,
+                    content_type="application/json",
+                    delivery_mode=DeliveryMode.PERSISTENT,  # survive broker restart
+                    headers=headers,
+                )
+                # Raises on nack/timeout because confirm_delivery() is enabled.
+                await exchange.publish(message, routing_key=routing_key, timeout=10)
+            except Exception as exc:
+                duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                span.set_status(StatusCode.ERROR, str(exc))
+                span.record_exception(exc)
+                set_span_attributes(
+                    span, error_type=type(exc).__name__, duration_ms=duration_ms
+                )
+                self._logger.exception(
+                    "event_publish_failed",
+                    extra={**log_common, "duration_ms": duration_ms, "error_type": type(exc).__name__},
+                )
+                raise EventPublishError(f"Failed to publish event {event.event_id}: {exc}") from exc
+
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            set_span_attributes(span, duration_ms=duration_ms)
+            span.set_status(StatusCode.OK)
+
         self._logger.info("event_publish_succeeded", extra={**log_common, "duration_ms": duration_ms})
 
     async def close(self) -> None:
@@ -122,16 +169,69 @@ class InMemoryEventPublisher:
 
     Subscriber exceptions propagate to the caller of publish(), mirroring the
     behaviour of a real broker outage (publish fails -> API returns 503).
+
+    Week 10: it mimics the production publisher's observability exactly — it opens
+    the same `PRODUCER` span and injects the active trace context into a
+    per-message header dict, and hands that dict to any subscriber that accepts a
+    second argument. That lets the test suite exercise the real inject/extract
+    round trip across the "broker" boundary without RabbitMQ, and means a trace
+    captured in a test has the same span shape as one captured in production.
     """
 
     def __init__(self) -> None:
         self.published: list[DomainEvent] = []
         self.subscribers: list[EventSubscriber] = []
+        # Headers of the most recent publish, for assertions.
+        self.last_headers: dict[str, Any] = {}
+        self._logger = get_logger("messaging.publisher")
+        self._tracer = get_tracer()
 
     async def publish(self, event: DomainEvent) -> None:
-        self.published.append(event)
-        for subscriber in self.subscribers:
-            await subscriber(event)
+        settings = get_settings()
+        with self._tracer.start_as_current_span(
+            f"{settings.EVENT_EXCHANGE} publish",
+            kind=PRODUCER,
+            attributes={
+                "messaging.system": "rabbitmq",
+                "messaging.operation.name": "publish",
+                "messaging.operation.type": "send",
+                "messaging.destination.name": settings.EVENT_EXCHANGE,
+                "messaging.destination.routing_key": settings.ORDER_CREATED_ROUTING_KEY,
+                "messaging.message.id": str(event.event_id),
+                "event.type": event.event_type,
+                "messaging.test_double": True,
+            },
+        ) as span:
+            self.published.append(event)
+            headers = inject_trace_headers({"x-event-version": 1})
+            self.last_headers = headers
+            for subscriber in self.subscribers:
+                if _accepts_headers(subscriber):
+                    await subscriber(event, headers)
+                else:
+                    await subscriber(event)
+            span.set_status(StatusCode.OK)
 
     def clear(self) -> None:
         self.published.clear()
+        self.last_headers = {}
+
+
+def _accepts_headers(subscriber: EventSubscriber) -> bool:
+    """True when the subscriber opted into receiving AMQP headers."""
+    try:
+        signature = inspect.signature(subscriber)
+    except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+        return False
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD, parameter.VAR_POSITIONAL)
+    ]
+    required = [
+        parameter
+        for parameter in positional
+        if parameter.default is parameter.empty
+    ]
+    return len(positional) > 1 or len(required) > 1

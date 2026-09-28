@@ -80,6 +80,45 @@ class Settings(BaseSettings):
     CONSUMER_BACKOFF_BASE_SECONDS: float = 1.0
     CONSUMER_BACKOFF_MAX_SECONDS: float = 60.0
 
+    # --- Distributed tracing (OpenTelemetry, Week 10) ---
+    # Master switch. When false the SDK is never installed, every
+    # `tracer.start_as_current_span(...)` becomes a no-op context manager, and
+    # the app behaves exactly as it did before tracing was added.
+    OTEL_ENABLED: bool = True
+
+    # service.name is what Jaeger groups traces by, so each process must
+    # override the default. docker-compose sets this per service
+    # (inventory-orders-api / order-persistence-consumer / inventory-worker /
+    # read-projector); the fallback keeps local runs legible.
+    OTEL_SERVICE_NAME: str = "inventory-orders-api"
+    OTEL_SERVICE_VERSION: str = "0.7.0"
+
+    # OTLP collector endpoint. Jaeger's all-in-one image accepts gRPC on 4317
+    # and HTTP/protobuf on 4318. Leave BOTH empty to fall back to the console
+    # exporter, which prints spans as JSON to stdout — handy with no collector
+    # running, and what the test suite uses.
+    OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
+    OTEL_EXPORTER_OTLP_PROTOCOL: str = "grpc"  # "grpc" | "http/protobuf"
+    # Seconds between span exports. Lower it in tests so assertions don't race
+    # the BatchSpanProcessor's 5s default flush interval.
+    OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS: int = 5
+
+    # Force the console exporter even when an OTLP endpoint is configured.
+    # Used by scripts/capture_trace.py to prove spans are being produced
+    # without needing a collector.
+    OTEL_CONSOLE_EXPORTER: bool = False
+
+    # Sampling. parentbased_always_on keeps 100% of traces (including any
+    # sampled by an upstream service). parentbased_traceidratio samples a
+    # fraction of root traces; switch to it for load runs.
+    OTEL_TRACES_SAMPLER: str = "parentbased_always_on"
+    OTEL_TRACES_SAMPLER_ARG: str = "1.0"
+
+    # Propagate trace context over the message broker. The W3C traceparent /
+    # tracestate headers are written into the AMQP message headers, which is
+    # what stitches the API's trace to the worker's trace in Jaeger.
+    OTEL_PROPAGATE_OVER_BROKER: bool = True
+
     @field_validator("JWT_SECRET_KEY")
     @classmethod
     def validate_jwt_secret_length(cls, value: str) -> str:

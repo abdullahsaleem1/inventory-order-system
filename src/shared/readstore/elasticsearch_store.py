@@ -17,13 +17,24 @@ Client wiring notes:
     node);
   * the client is created lazily on first use and reused for the process
     lifetime (`close()` on shutdown).
+
+Week 10 — tracing. The official `opentelemetry-instrumentation-elasticsearch`
+package only patches the *synchronous* client, so `CLIENT` spans are written by
+hand here, following the OpenTelemetry conventions for database clients
+(`db.system=elasticsearch`, `db.operation.name`, `db.namespace`). The result is
+that the read-projector trace shows which index operation dominated, the same
+way the write side shows `db.statement` spans from SQLAlchemy.
 """
+from typing import Any, Awaitable, Callable, TypeVar
+
 from elasticsearch import AsyncElasticsearch
 
+from src.core.telemetry import CLIENT, StatusCode, get_tracer, set_span_attributes
 from src.shared.readstore.base import OrderReadStore
 
-INDEX_SETTINGS = {"number_of_shards": 1, "number_of_replicas": 0}
+T = TypeVar("T")
 
+INDEX_SETTINGS = {"number_of_shards": 1, "number_of_replicas": 0}
 # Minimal mapping — everything the API reads is stored as-is; customer_id is
 # a keyword so listing per customer is an indexed term query, not a scan.
 INDEX_MAPPINGS = {
@@ -45,6 +56,7 @@ class ElasticsearchOrderReadStore(OrderReadStore):
         self._url = url
         self._index = index
         self._client: AsyncElasticsearch | None = None
+        self._tracer = get_tracer()
 
     @property
     def client(self) -> AsyncElasticsearch:
@@ -52,24 +64,67 @@ class ElasticsearchOrderReadStore(OrderReadStore):
             self._client = AsyncElasticsearch(self._url)
         return self._client
 
+    def _span(self, operation: str, **attributes: Any):
+        """CLIENT span around one Elasticsearch call.
+
+        Synchronous on purpose: it returns the context manager for a `with`
+        block, and the awaitable work happens inside. `db.system` is
+        `elasticsearch` per the semantic conventions, and `db.namespace` carries
+        the index so a trace can be filtered to just the `orders` index in
+        Jaeger.
+        """
+        return self._tracer.start_as_current_span(
+            f"elasticsearch {operation}",
+            kind=CLIENT,
+            attributes={
+                "db.system": "elasticsearch",
+                "db.operation.name": operation,
+                "db.namespace": self._index,
+                "server.address": self._url,
+                **attributes,
+            },
+        )
+
+    async def _call(
+        self, operation: str, func: Callable[[], Awaitable[T]], **attributes: Any
+    ) -> T:
+        """Await `func()` inside a CLIENT span, recording success or failure."""
+        with self._span(operation, **attributes) as span:
+            try:
+                result = await func()
+            except Exception as exc:
+                span.set_status(StatusCode.ERROR, str(exc))
+                span.record_exception(exc)
+                set_span_attributes(span, error_type=type(exc).__name__)
+                raise
+            span.set_status(StatusCode.OK)
+            return result
+
     async def _ensure_index(self) -> None:
         client = self.client
-        if await client.indices.exists(index=self._index):
+        if await self._call("indices.exists", lambda: client.indices.exists(index=self._index)):
             return
-        await client.indices.create(
-            index=self._index,
-            settings=INDEX_SETTINGS,
-            mappings=INDEX_MAPPINGS,
+        await self._call(
+            "indices.create",
+            lambda: client.indices.create(
+                index=self._index,
+                settings=INDEX_SETTINGS,
+                mappings=INDEX_MAPPINGS,
+            ),
         )
 
     async def upsert_order(self, document: dict) -> None:
         await self._ensure_index()
         order_id = str(document["order_id"])
-        await self.client.index(
-            index=self._index,
-            id=order_id,
-            document=document,
-            refresh="wait_for",
+        await self._call(
+            "index",
+            lambda: self.client.index(
+                index=self._index,
+                id=order_id,
+                document=document,
+                refresh="wait_for",
+            ),
+            **{"db.document.id": order_id},
         )
 
     async def update_status(self, order_id: str, status: str) -> None:
@@ -77,18 +132,26 @@ class ElasticsearchOrderReadStore(OrderReadStore):
         # upsert: even if the status event beats the create event through the
         # pipeline, the eventual full order.created projection will overwrite
         # the whole document (upsert_order replaces by id).
-        await self.client.update(
-            index=self._index,
-            id=str(order_id),
-            doc={"status": status},
-            upsert={"order_id": str(order_id), "status": status, "items": []},
-            refresh="wait_for",
+        await self._call(
+            "update",
+            lambda: self.client.update(
+                index=self._index,
+                id=str(order_id),
+                doc={"status": status},
+                upsert={"order_id": str(order_id), "status": status, "items": []},
+                refresh="wait_for",
+            ),
+            **{"db.document.id": str(order_id), "order.status": status},
         )
 
     async def get_order(self, order_id: str) -> dict | None:
         await self._ensure_index()
         try:
-            resp = await self.client.get(index=self._index, id=str(order_id))
+            resp = await self._call(
+                "get",
+                lambda: self.client.get(index=self._index, id=str(order_id)),
+                **{"db.document.id": str(order_id)},
+            )
         except Exception:
             return None
         source = resp.get("_source")
@@ -98,18 +161,23 @@ class ElasticsearchOrderReadStore(OrderReadStore):
         self, customer_id: str, limit: int = 20, offset: int = 0
     ) -> list[dict]:
         await self._ensure_index()
-        resp = await self.client.search(
-            index=self._index,
-            query={"term": {"customer_id": str(customer_id)}},
-            sort=[{"created_at": {"order": "desc"}}],
-            from_=offset,
-            size=limit,
+        resp = await self._call(
+            "search",
+            lambda: self.client.search(
+                index=self._index,
+                query={"term": {"customer_id": str(customer_id)}},
+                sort=[{"created_at": {"order": "desc"}}],
+                from_=offset,
+                size=limit,
+            ),
+            **{"customer.id": str(customer_id), "db.query.limit": limit, "db.query.offset": offset},
         )
         return [dict(hit["_source"]) for hit in resp["hits"]["hits"]]
 
     async def count(self) -> int:
         await self._ensure_index()
-        return int((await self.client.count(index=self._index))["count"])
+        resp = await self._call("count", lambda: self.client.count(index=self._index))
+        return int(resp["count"])
 
     async def ping(self) -> bool:
         try:
@@ -119,7 +187,7 @@ class ElasticsearchOrderReadStore(OrderReadStore):
 
     async def refresh(self) -> None:
         await self._ensure_index()
-        await self.client.indices.refresh(index=self._index)
+        await self._call("indices.refresh", lambda: self.client.indices.refresh(index=self._index))
 
     async def close(self) -> None:
         if self._client is not None:

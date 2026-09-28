@@ -26,6 +26,18 @@ aiohttp==3.14.3              # async HTTP transport for the Elasticsearch client
 # --- rate limiting (Week 9) ---
 redis==6.4.0                 # async Redis client (token-bucket rate limiting)
 
+# --- distributed tracing (Week 10) ---
+# NOTE: opentelemetry-instrumentation-* releases trail the SDK by one minor
+# (instrumentations 0.65b0 pin semconv 0.65b0, which is what SDK 1.44.0 pins).
+# Bump SDK and instrumentations together or pip's resolver will backtrack.
+opentelemetry-api==1.44.0                  # spans, context, propagators
+opentelemetry-sdk==1.44.0                  # TracerProvider, BatchSpanProcessor, Resource
+opentelemetry-exporter-otlp-proto-grpc==1.44.0   # OTLP/gRPC exporter -> Jaeger (4317)
+opentelemetry-exporter-otlp-proto-http==1.44.0   # OTLP/HTTP exporter -> collector (4318)
+opentelemetry-instrumentation-fastapi==0.65b0    # inbound HTTP server spans
+opentelemetry-instrumentation-sqlalchemy==0.65b0 # db.* spans for every engine
+opentelemetry-instrumentation-logging==0.65b0    # binds trace/span ids onto LogRecords
+
 # --- test tooling ---
 pytest==9.1.1
 pytest-asyncio==1.4.0
@@ -33,5 +45,4 @@ httpx==0.28.1
 aiosqlite==0.22.1           # in-memory DB for auth integration tests
 
 # --- to be added in later weeks ---
-# redis                       # rate limiter (rate-limiting week)
-# opentelemetry-sdk           # tracing week
+# # (none yet)

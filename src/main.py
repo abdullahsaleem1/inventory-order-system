@@ -3,6 +3,10 @@ Application entrypoint. Wires together the Inventory, Orders and Identity
 bounded contexts, structured logging, standardized error handling, and
 system (health/ready) routes.
 This file stays thin — actual logic lives in the bounded contexts.
+
+Week 10 bootstraps OpenTelemetry here, before anything else imports, so that
+`src.shared.infrastructure.database` (which creates and instruments the engine at
+import time) records its spans into the same provider the request path uses.
 """
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
@@ -18,11 +22,24 @@ from src.core.middleware import RequestLoggingMiddleware
 from src.core.ratelimit.middleware import RateLimitMiddleware
 from src.core.ratelimit.provider import build_rate_limiter, close_rate_limiter, probe_rate_limiter
 from src.core.system_routes import router as system_router
+from src.core.telemetry import (
+    init_tracing,
+    instrument_app,
+    instrument_logging,
+    instrument_read_store,
+    shutdown_tracing,
+)
 from src.shared.messaging.provider import build_event_publisher, close_event_publisher
 from src.shared.readstore import build_read_store, close_read_store
 
 configure_logging()
 logger = get_logger(__name__)
+
+# Tracing comes before the app object exists so that anything imported below
+# (engines, the read store, instrumentors) is already attached to the provider.
+# OTEL_SERVICE_NAME is set per-service by docker-compose; the settings default
+# names this process `inventory-orders-api`.
+init_tracing()
 
 settings = get_settings()
 
@@ -35,9 +52,12 @@ app = FastAPI(
         "OAuth2.0-compatible authorization server, and event-driven order "
         "creation via RabbitMQ (order.created -> durable queues -> consumer "
         "groups). v0.6 makes order creation fully asynchronous: POST /orders "
-        "publishes an event instead of writing to the database synchronously."
+        "publishes an event instead of writing to the database synchronously. "
+        "v0.7 adds OpenTelemetry distributed tracing end to end — every "
+        "request, event, and query is a span, and trace context travels in the "
+        "message headers so Jaeger shows one trace across api, workers, and DB."
     ),
-    version="0.6.0",
+    version="0.7.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -48,6 +68,14 @@ app = FastAPI(
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 register_exception_handlers(app)
+
+# Week 10: outermost ASGI middleware, so the server span wraps the rate limiter
+# and request logging too (a 429 is still a trace).
+instrument_app(app)
+# Stamps trace_id/span_id onto every LogRecord.
+instrument_logging()
+# Elasticsearch CLIENT spans are hand-written in the read store.
+instrument_read_store()
 
 app.include_router(system_router)
 app.include_router(identity_router)
@@ -104,4 +132,7 @@ async def on_shutdown() -> None:
     await close_event_publisher()
     await close_read_store()
     await close_rate_limiter()
+    # Flush spans BEFORE the interpreter exits, otherwise the last few spans of
+    # a shutdown (and everything since the last 5s batch) never reach Jaeger.
+    shutdown_tracing()
     logger.info("application_shutdown")
