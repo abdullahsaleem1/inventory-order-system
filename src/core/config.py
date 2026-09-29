@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_BUCKET_TTL_SECONDS: int = 60      # idle buckets expire
     RATE_LIMIT_REDIS_TIMEOUT_SECONDS: float = 0.5  # per-command Redis timeout
+    # --- Redis circuit breaker (Week 11) ---
+    # Without a breaker every request pays the full Redis timeout while Redis is
+    # down. After `..._CIRCUIT_FAILURES` consecutive failures the breaker opens
+    # and requests are served straight from the in-process fallback bucket with
+    # zero Redis I/O, until a single half-open probe proves Redis is back.
+    RATE_LIMIT_REDIS_CIRCUIT_FAILURES: int = 2
+    RATE_LIMIT_REDIS_CIRCUIT_COOLDOWN_SECONDS: float = 5.0
+    RATE_LIMIT_REDIS_CIRCUIT_MAX_COOLDOWN_SECONDS: float = 60.0
     RATE_LIMIT_ANON_CAPACITY: int = 5
     RATE_LIMIT_ANON_RATE: float = 1.0
     RATE_LIMIT_CUSTOMER_CAPACITY: int = 10

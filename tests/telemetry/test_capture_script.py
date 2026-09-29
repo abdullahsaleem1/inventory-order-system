@@ -167,7 +167,9 @@ class TestRetryScenario:
         attempts = [s for s in spans if s["name"] == "orders.order-created.inventory process"]
         assert len(attempts) == 2, "expected the original delivery plus the retry"
 
-        republish = _by_name(spans, "orders.order-created.inventory.retry.1 publish")
+        republish = _by_name(
+            spans, "orders.order-created.inventory.retry.order.created.1 publish"
+        )
         assert republish["kind"] == 4
         # It hangs off the failing attempt, not the first (successful) one.
         assert republish["parentSpanId"] in {a["spanId"] for a in attempts}

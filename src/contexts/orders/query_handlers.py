@@ -16,6 +16,8 @@ from src.contexts.orders.queries import GetOrderQuery, ListOrdersByCustomerQuery
 from src.contexts.orders.repositories.order_read_store_repository import (
     OrderReadStoreRepository,
 )
+from src.shared.exceptions import ServiceUnavailableError
+from src.shared.readstore.errors import ReadStoreUnavailableError
 
 
 class GetOrderQueryHandler:
@@ -23,7 +25,16 @@ class GetOrderQueryHandler:
         self._read_repo = read_repo
 
     async def handle(self, query: GetOrderQuery) -> "object":
-        record = await self._read_repo.get_by_id(query.order_id)
+        try:
+            record = await self._read_repo.get_by_id(query.order_id)
+        except ReadStoreUnavailableError as exc:
+            # The read store could not answer. This must NOT be reported as a
+            # 404: during an Elasticsearch outage "not found" is a lie that
+            # sends an on-call engineer hunting for a missing order.
+            raise ServiceUnavailableError(
+                "Order lookup is temporarily unavailable: the read store is down",
+                code="READ_STORE_UNAVAILABLE",
+            ) from exc
         if record is None:
             raise OrderNotFoundError(f"Order {query.order_id} not found")
         return record
@@ -36,8 +47,14 @@ class ListOrdersByCustomerQueryHandler:
         self._read_repo = read_repo
 
     async def handle(self, query: ListOrdersByCustomerQuery) -> list["object"]:
-        return await self._read_repo.list_by_customer(
-            query.customer_id,
-            limit=query.limit,
-            offset=query.offset,
-        )
+        try:
+            return await self._read_repo.list_by_customer(
+                query.customer_id,
+                limit=query.limit,
+                offset=query.offset,
+            )
+        except ReadStoreUnavailableError as exc:
+            raise ServiceUnavailableError(
+                "Order listing is temporarily unavailable: the read store is down",
+                code="READ_STORE_UNAVAILABLE",
+            ) from exc

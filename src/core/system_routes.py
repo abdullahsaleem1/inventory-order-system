@@ -32,7 +32,13 @@ class ReadinessResponse(BaseModel):
     status: Literal["ready", "not_ready"]
     database: Literal["up", "down"]
     broker: Literal["up", "down", "disabled"]
-    redis: Literal["up", "down", "disabled"]
+    # "degraded" is reported when Redis is unreachable but the API is still
+    # serving traffic via the in-process fallback bucket. It must stay a valid
+    # member of this Literal: RateLimiter.probe() emits it, and an unknown
+    # value raises a ValidationError *after* the endpoint returns, which
+    # discards the readiness body and turns a graceful degradation into a
+    # 500 INTERNAL_ERROR.
+    redis: Literal["up", "degraded", "down", "disabled"]
 
 
 @router.get("/health", response_model=HealthResponse, summary="Liveness check")

@@ -9,6 +9,7 @@ triggers an in-process fallback so the API degrades gracefully instead of
 crashing.
 """
 import asyncio
+import time
 
 import redis.asyncio as aioredis
 
@@ -32,6 +33,15 @@ class RateLimiter:
     - If the Redis backend is unavailable the call is served by the in-process
       fallback bucket and ``degraded`` is set, so the API keeps running in a
       degraded state.
+
+    A circuit breaker (Week 11) sits in front of the Redis backend. Falling
+    back per-request is not enough on its own: every request would still pay
+    the full Redis command timeout, so a dead Redis would add that latency to
+    the entire API indefinitely. Once ``failure_threshold`` consecutive calls
+    fail the breaker *opens* and ``check()`` serves from the fallback bucket
+    with zero Redis I/O. After ``cooldown_base`` seconds a single half-open
+    probe is allowed through; success closes the breaker, failure re-opens it
+    with an exponentially longer cooldown (capped).
     """
 
     def __init__(
@@ -41,12 +51,24 @@ class RateLimiter:
         policy: RateLimitPolicy,
         *,
         enabled: bool = True,
+        failure_threshold: int = 2,
+        cooldown_base: float = 5.0,
+        cooldown_max: float = 60.0,
     ) -> None:
         self._backend = backend
         self._fallback = fallback
         self._policy = policy
         self.enabled = enabled
         self._degraded = False
+        self._failure_threshold = max(1, failure_threshold)
+        self._cooldown_base = max(0.0, cooldown_base)
+        self._cooldown_max = max(self._cooldown_base, cooldown_max)
+        # Circuit-breaker state.
+        self._consecutive_failures = 0
+        self._cooldown_seconds = self._cooldown_base
+        self._opened_at = 0.0
+        self._half_open_in_flight = False
+        self._circuit_lock = asyncio.Lock()
 
     @property
     def degraded(self) -> bool:
@@ -56,27 +78,102 @@ class RateLimiter:
     def policy(self) -> RateLimitPolicy:
         return self._policy
 
+    @property
+    def circuit_open(self) -> bool:
+        """True while the breaker is open (Redis skipped entirely)."""
+        return self._consecutive_failures >= self._failure_threshold
+
+    async def _allow_redis_call(self) -> bool:
+        """Decide whether this request may touch Redis; may claim the probe slot.
+
+        Returns True when the caller should attempt the Redis backend. While
+        the breaker is open the answer is False until the cooldown elapses, at
+        which point exactly one caller is admitted as a half-open probe.
+        """
+        async with self._circuit_lock:
+            if self._consecutive_failures < self._failure_threshold:
+                return True
+            if time.monotonic() - self._opened_at < self._cooldown_seconds:
+                return False  # still cooling down: serve from the fallback
+            if self._half_open_in_flight:
+                return False  # another caller is already probing
+            self._half_open_in_flight = True
+            return True
+
+    def _record_redis_success(self) -> None:
+        self._consecutive_failures = 0
+        self._cooldown_seconds = self._cooldown_base
+        self._half_open_in_flight = False
+        self._degraded = False
+
+    def _record_redis_failure(self, *, key: str) -> None:
+        first = not self._degraded
+        self._consecutive_failures += 1
+        self._half_open_in_flight = False
+        if first:
+            logger.warning(
+                "rate_limiter_degraded",
+                extra={"reason": "redis unavailable", "key": key},
+            )
+        if self._consecutive_failures >= self._failure_threshold:
+            if self._opened_at == 0.0:
+                # First transition into the open state: start the clock.
+                self._opened_at = time.monotonic()
+            self._cooldown_seconds = min(self._cooldown_max, self._cooldown_base * (2 ** min(
+                self._consecutive_failures - self._failure_threshold, 8
+            )))
+            if first:
+                logger.warning(
+                    "rate_limiter_circuit_open",
+                    extra={
+                        "cooldown_seconds": self._cooldown_seconds,
+                        "consecutive_failures": self._consecutive_failures,
+                    },
+                )
+        self._degraded = True
+
     async def check(self, key: str, role: str | None) -> TokenBucketResult:
         if not self.enabled:
             return TokenBucketResult(allowed=True, balance=0.0, retry_after_seconds=0.0)
         tier = self._policy.tier(role)
+        if not await self._allow_redis_call():
+            # Breaker open: no Redis I/O at all, serve from the fallback bucket.
+            return await self._fallback.consume(
+                key, capacity=tier.capacity, rate=tier.rate
+            )
         try:
             result = await self._backend.consume(
                 key, capacity=tier.capacity, rate=tier.rate
             )
         except RateLimiterUnavailableError:
-            if not self._degraded:
-                logger.warning(
-                    "rate_limiter_degraded",
-                    extra={"reason": "redis unavailable", "key": key},
-                )
-            self._degraded = True
+            self._record_redis_failure(key=key)
             result = await self._fallback.consume(
                 key, capacity=tier.capacity, rate=tier.rate
             )
         else:
-            self._degraded = False
+            self._record_redis_success()
         return result
+
+    def _record_probe_failure(self) -> None:
+        """Record a failed /ready probe.
+
+        A probe is a health check, not a load-bearing request, so it must open
+        the circuit (to stop the request path hammering a dead Redis) but must
+        NOT ratchet the backoff: a frequently-polled /ready would otherwise
+        inflate the cooldown and delay genuine recovery.
+        """
+        self._degraded = True
+        if self._consecutive_failures < self._failure_threshold:
+            self._consecutive_failures = self._failure_threshold
+            self._opened_at = time.monotonic()
+            self._cooldown_seconds = self._cooldown_base
+            logger.warning(
+                "rate_limiter_circuit_open",
+                extra={
+                    "cooldown_seconds": self._cooldown_seconds,
+                    "trigger": "readiness_probe",
+                },
+            )
 
     async def probe(self) -> str:
         """Return 'up', 'degraded' or 'disabled' for the /ready endpoint."""
@@ -86,7 +183,13 @@ class RateLimiter:
             up = await asyncio.wait_for(self._backend.ping(), timeout=1.0)
         except Exception:
             up = False
-        self._degraded = not up
+        # Readiness must report real Redis health even while the breaker is
+        # open, so the probe always pings Redis; a successful probe doubles as
+        # the recovery signal that closes the circuit.
+        if up:
+            self._record_redis_success()
+        else:
+            self._record_probe_failure()
         return "up" if up else "degraded"
 
 
@@ -117,7 +220,15 @@ def build_rate_limiter() -> RateLimiter:
         backend = InMemoryTokenBucket()
         logger.info("rate_limiter_disabled", extra={"reason": "RATE_LIMIT_ENABLED=false"})
 
-    _limiter = RateLimiter(backend, InMemoryTokenBucket(), policy, enabled=settings.RATE_LIMIT_ENABLED)
+    _limiter = RateLimiter(
+        backend,
+        InMemoryTokenBucket(),
+        policy,
+        enabled=settings.RATE_LIMIT_ENABLED,
+        failure_threshold=settings.RATE_LIMIT_REDIS_CIRCUIT_FAILURES,
+        cooldown_base=settings.RATE_LIMIT_REDIS_CIRCUIT_COOLDOWN_SECONDS,
+        cooldown_max=settings.RATE_LIMIT_REDIS_CIRCUIT_MAX_COOLDOWN_SECONDS,
+    )
     return _limiter
 
 

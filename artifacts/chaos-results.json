@@ -1,0 +1,340 @@
+{
+  "generated_at": "2026-09-28T13:08:46",
+  "window_seconds": 1.0,
+  "concurrency": 8,
+  "scenarios": [
+    {
+      "name": "Redis outage",
+      "hypothesis": "Redis outage: graceful degradation + circuit breaker",
+      "passed": true,
+      "detail": "/ready=200 redis=degraded X-RateLimit-Degraded=true redis_calls_for_40_reqs=0 healed_degraded_header=None",
+      "metrics": {
+        "steady": {
+          "requests": 89,
+          "duration_s": 1.0,
+          "rps": 89.0,
+          "codes": {
+            "200": 50,
+            "202": 36,
+            "404": 3
+          },
+          "kinds": {
+            "create": 36,
+            "health": 9,
+            "read": 44
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 72.51,
+          "p95_ms": 168.0,
+          "p99_ms": 184.8,
+          "mean_ms": 94.74,
+          "max_ms": 187.43
+        },
+        "redis_down": {
+          "requests": 82,
+          "duration_s": 1.0,
+          "rps": 82.0,
+          "codes": {
+            "200": 36,
+            "202": 34,
+            "404": 12
+          },
+          "kinds": {
+            "create": 34,
+            "health": 3,
+            "read": 45
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 79,
+          "p50_ms": 71.3,
+          "p95_ms": 180.17,
+          "p99_ms": 193.96,
+          "mean_ms": 102.23,
+          "max_ms": 197.25
+        },
+        "recovered": {
+          "requests": 165,
+          "duration_s": 2.0,
+          "rps": 82.5,
+          "codes": {
+            "200": 89,
+            "202": 66,
+            "404": 10
+          },
+          "kinds": {
+            "create": 66,
+            "health": 18,
+            "read": 81
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 74.06,
+          "p95_ms": 185.84,
+          "p99_ms": 198.83,
+          "mean_ms": 98.48,
+          "max_ms": 205.27
+        },
+        "probe": {
+          "ready_status": 200,
+          "ready_body": {
+            "status": "ready",
+            "database": "up",
+            "broker": "disabled",
+            "redis": "degraded"
+          },
+          "degraded_header_during_outage": "true",
+          "redis_calls_40_requests": 0,
+          "redis_calls_at_trip": 233,
+          "degraded_header_after_heal": null
+        }
+      }
+    },
+    {
+      "name": "Broker outage",
+      "hypothesis": "Broker outage: fail closed with 503, no partial writes",
+      "passed": true,
+      "detail": "create=503 code=EVENT_PUBLISH_FAILED health=200",
+      "metrics": {
+        "steady": {
+          "requests": 87,
+          "duration_s": 1.0,
+          "rps": 87.0,
+          "codes": {
+            "200": 39,
+            "202": 38,
+            "404": 10
+          },
+          "kinds": {
+            "create": 38,
+            "health": 9,
+            "read": 40
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 73.95,
+          "p95_ms": 164.36,
+          "p99_ms": 172.5,
+          "mean_ms": 94.99,
+          "max_ms": 172.7
+        },
+        "broker_down": {
+          "requests": 96,
+          "duration_s": 1.0,
+          "rps": 96.0,
+          "codes": {
+            "200": 8,
+            "404": 54,
+            "503": 34
+          },
+          "kinds": {
+            "create": 34,
+            "health": 8,
+            "read": 54
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 91.06,
+          "p95_ms": 112.17,
+          "p99_ms": 124.67,
+          "mean_ms": 86.04,
+          "max_ms": 125.5
+        },
+        "recovered": {
+          "requests": 91,
+          "duration_s": 1.0,
+          "rps": 91.0,
+          "codes": {
+            "200": 51,
+            "202": 35,
+            "404": 5
+          },
+          "kinds": {
+            "create": 35,
+            "health": 15,
+            "read": 41
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 67.87,
+          "p95_ms": 182.75,
+          "p99_ms": 190.77,
+          "mean_ms": 89.63,
+          "max_ms": 191.32
+        },
+        "probe": {
+          "create_status": 503,
+          "error_code": "EVENT_PUBLISH_FAILED",
+          "health_status": 200
+        }
+      }
+    },
+    {
+      "name": "Worker outage",
+      "hypothesis": "Worker outage: API unaffected, consumers catch up",
+      "passed": true,
+      "detail": "202s steady=33 worker_down=22 errors=0",
+      "metrics": {
+        "steady": {
+          "requests": 80,
+          "duration_s": 1.0,
+          "rps": 80.0,
+          "codes": {
+            "200": 42,
+            "202": 33,
+            "404": 5
+          },
+          "kinds": {
+            "create": 33,
+            "health": 11,
+            "read": 36
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 76.25,
+          "p95_ms": 186.88,
+          "p99_ms": 219.7,
+          "mean_ms": 103.93,
+          "max_ms": 220.1
+        },
+        "worker_down": {
+          "requests": 64,
+          "duration_s": 1.0,
+          "rps": 64.0,
+          "codes": {
+            "200": 31,
+            "202": 22,
+            "404": 11
+          },
+          "kinds": {
+            "create": 22,
+            "health": 8,
+            "read": 34
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 97.13,
+          "p95_ms": 266.34,
+          "p99_ms": 277.3,
+          "mean_ms": 127.86,
+          "max_ms": 278.62
+        },
+        "recovered": {
+          "requests": 76,
+          "duration_s": 1.0,
+          "rps": 76.0,
+          "codes": {
+            "200": 36,
+            "202": 27,
+            "404": 13
+          },
+          "kinds": {
+            "create": 27,
+            "health": 10,
+            "read": 39
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 85.09,
+          "p95_ms": 209.17,
+          "p99_ms": 222.24,
+          "mean_ms": 106.6,
+          "max_ms": 250.75
+        }
+      }
+    },
+    {
+      "name": "Read-store outage (Elasticsearch)",
+      "hypothesis": "Read-store outage: 503, never a false 404",
+      "passed": true,
+      "detail": "read=503 code=READ_STORE_UNAVAILABLE absent=503 health=200 after_heal=404",
+      "metrics": {
+        "steady": {
+          "requests": 70,
+          "duration_s": 1.0,
+          "rps": 70.0,
+          "codes": {
+            "200": 38,
+            "202": 27,
+            "404": 5
+          },
+          "kinds": {
+            "create": 27,
+            "health": 11,
+            "read": 32
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 88.91,
+          "p95_ms": 252.77,
+          "p99_ms": 259.65,
+          "mean_ms": 118.57,
+          "max_ms": 260.31
+        },
+        "es_down": {
+          "requests": 72,
+          "duration_s": 1.0,
+          "rps": 72.0,
+          "codes": {
+            "200": 5,
+            "202": 26,
+            "503": 41
+          },
+          "kinds": {
+            "create": 26,
+            "health": 5,
+            "read": 41
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 90.49,
+          "p95_ms": 199.41,
+          "p99_ms": 202.14,
+          "mean_ms": 114.0,
+          "max_ms": 202.92
+        },
+        "recovered": {
+          "requests": 78,
+          "duration_s": 1.0,
+          "rps": 78.0,
+          "codes": {
+            "200": 34,
+            "202": 26,
+            "404": 18
+          },
+          "kinds": {
+            "create": 26,
+            "health": 11,
+            "read": 41
+          },
+          "errors": 0,
+          "sample_errors": [],
+          "degraded_headers": 0,
+          "p50_ms": 85.26,
+          "p95_ms": 217.01,
+          "p99_ms": 220.68,
+          "mean_ms": 106.66,
+          "max_ms": 226.31
+        },
+        "probe": {
+          "read_status_during_outage": 503,
+          "error_code": "READ_STORE_UNAVAILABLE",
+          "absent_order_status_during_outage": 503,
+          "health_status": 200,
+          "read_status_after_heal": 404
+        }
+      }
+    }
+  ]
+}

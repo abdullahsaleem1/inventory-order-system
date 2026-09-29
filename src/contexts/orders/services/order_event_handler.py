@@ -15,6 +15,7 @@ command handlers keep the projection's `status` in sync for later transitions.
 """
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.contexts.orders.events import order_from_created_event
@@ -44,10 +45,27 @@ class PersistOrderCreatedHandler:
                 # At-least-once delivery => duplicates are expected, not errors.
                 self._logger.info("event_duplicate_skipped", extra=log_common)
                 return
-            await write_repo.add(order)
-            # Maintain the read projection transactionally with the write.
-            await read_repo.upsert_from(order, created_at=event.occurred_at)
-            await session.commit()
+            try:
+                await write_repo.add(order)
+                # Maintain the read projection transactionally with the write.
+                await read_repo.upsert_from(order, created_at=event.occurred_at)
+                await session.commit()
+            except IntegrityError:
+                # Week 11: the check-then-act above is not atomic, so two
+                # concurrent redeliveries can both observe "missing" and race on
+                # the primary key. The losing INSERT raises IntegrityError, which
+                # is not a PermanentMessageError — the consumer therefore counted
+                # it as transient, burned all three retries and dead-lettered an
+                # order that had actually been persisted correctly. Verify the row
+                # really is there and treat it as the duplicate it is.
+                await session.rollback()
+                if await write_repo.get_by_id(order.id) is not None:
+                    self._logger.info(
+                        "event_duplicate_skipped",
+                        extra={**log_common, "reason": "concurrent_duplicate"},
+                    )
+                    return
+                raise
 
         self._logger.info(
             "order_persisted",

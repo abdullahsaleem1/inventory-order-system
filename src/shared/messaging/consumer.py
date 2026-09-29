@@ -85,8 +85,13 @@ class QueueGroupSpec:
     handler: Any  # async callable(DomainEvent) -> None
     # Internal: the declared work queue, filled in during start().
     declared_queue: Any = field(default=None, init=False, repr=False)
-    # Internal: per-attempt retry queues used for exponential backoff.
-    retry_queues: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    # Internal: per-attempt retry queues used for exponential backoff, keyed by
+    # (routing_key, attempt). Keyed by routing key because a retry queue's
+    # dead-letter routing key is fixed at declare time, so a group bound to
+    # several routing keys needs one stairway per routing key.
+    retry_queues: dict[tuple[str, int], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
 
 class RabbitMQEventConsumer:
@@ -149,19 +154,28 @@ class RabbitMQEventConsumer:
 
             # Stairway of retry queues — one per attempt, each dead-lettering
             # back onto the main exchange after its per-message TTL elapses.
-            # The expired message re-enters `exchange` under the group's
-            # routing key and is routed back into `work_queue`.
-            retry_routing_key = spec.routing_keys[0]
-            for attempt in range(1, self._max_retries + 1):
-                retry_queue = await channel.declare_queue(
-                    f"{spec.queue_name}.retry.{attempt}",
-                    durable=True,
-                    arguments={
-                        "x-dead-letter-exchange": self._exchange_name,
-                        "x-dead-letter-routing-key": retry_routing_key,
-                    },
-                )
-                spec.retry_queues[attempt] = retry_queue
+            # The expired message re-enters `exchange` under the routing key it
+            # originally arrived with and is routed back into `work_queue`.
+            #
+            # Week 11: a retry queue's dead-letter routing key is fixed when the
+            # queue is declared, so a group bound to more than one routing key
+            # needs a separate stairway per routing key. Reusing a single
+            # stairway keyed on `routing_keys[0]` (as this did) meant a retried
+            # `order.status.changed` re-entered the exchange as
+            # `order.created` and was fanned out to the persistence, audit and
+            # inventory groups as well — re-delivering a status event to
+            # consumers that must not act on it.
+            for routing_key in spec.routing_keys:
+                for attempt in range(1, self._max_retries + 1):
+                    retry_queue = await channel.declare_queue(
+                        f"{spec.queue_name}.retry.{routing_key}.{attempt}",
+                        durable=True,
+                        arguments={
+                            "x-dead-letter-exchange": self._exchange_name,
+                            "x-dead-letter-routing-key": routing_key,
+                        },
+                    )
+                    spec.retry_queues[(routing_key, attempt)] = retry_queue
         return exchange
 
     # --- lifecycle ----------------------------------------------------------
@@ -226,7 +240,25 @@ class RabbitMQEventConsumer:
                 "error": str(error),
             },
         )
-        retry_queue = spec.retry_queues[attempt]
+        # Re-enter the exchange under the routing key the message arrived with,
+        # so a retried status event stays on the status event's bindings.
+        routing_key = message.routing_key
+        retry_queue = spec.retry_queues.get((routing_key, attempt))
+        if retry_queue is None:
+            # The message arrived under a binding this group never declared (a
+            # producer used a key we do not consume, or topology drifted). Reject
+            # instead of guessing a routing key: guessing is what previously
+            # fanned messages across unrelated consumer groups.
+            self._logger.error(
+                "event_retry_unroutable",
+                extra={
+                    **log_common,
+                    "attempt": attempt,
+                    "expected_routing_keys": list(spec.routing_keys),
+                },
+            )
+            await message.reject(requeue=False)
+            return
         with self._tracer.start_as_current_span(
             f"{retry_queue.name} publish",
             kind=PRODUCER,

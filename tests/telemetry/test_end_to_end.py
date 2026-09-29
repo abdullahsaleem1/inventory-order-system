@@ -125,14 +125,17 @@ def consumer():
             [spec],
             max_retries=max_retries,
         )
-        # Retry queue 1..max, as `_declare_topology` would have created them.
-        for attempt in range(1, max_retries + 1):
-            channel = FakeChannel()
-            channel.published = []
-            retry_queue = FakeChannel()
-            retry_queue.name = f"{QUEUE_NAME}.retry.{attempt}"
-            retry_queue.channel = channel
-            spec.retry_queues[attempt] = retry_queue
+        # Retry queue 1..max per routing key, as `_declare_topology` would have
+        # created them (Week 11: one stairway per routing key, so a retried
+        # `order.status.changed` dead-letters back under its own routing key).
+        for routing_key in spec.routing_keys:
+            for attempt in range(1, max_retries + 1):
+                channel = FakeChannel()
+                channel.published = []
+                retry_queue = FakeChannel()
+                retry_queue.name = f"{QUEUE_NAME}.retry.{routing_key}.{attempt}"
+                retry_queue.channel = channel
+                spec.retry_queues[(routing_key, attempt)] = retry_queue
         return con, spec
 
     return build
@@ -274,7 +277,7 @@ class TestConsumerFailurePaths:
 
             # The retry publish parked a copy in `.retry.1` with its own
             # traceparent; simulate the TTL expiring and the broker redelivering.
-            retry_copy = spec.retry_queues[1].channel.published[-1][1]
+            retry_copy = spec.retry_queues[("order.created", 1)].channel.published[-1][1]
             assert retry_copy.headers["x-retry-count"] == 1
             redelivered = FakeMessage(
                 retry_copy.body,
@@ -297,7 +300,7 @@ class TestConsumerFailurePaths:
         with get_tracer().start_as_current_span("POST /orders"):
             await _publish_and_deliver(publisher, consumer(handler), _make_event())
 
-        retry_publish = spans.first(".retry.1 publish")
+        retry_publish = spans.first(".retry.order.created.1 publish")
         failed_attempt = spans.first(QUEUE_NAME, "process")
 
         assert retry_publish.kind == SpanKind.PRODUCER

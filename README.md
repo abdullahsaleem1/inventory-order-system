@@ -729,7 +729,8 @@ per-process in-memory buckets instead of failing.
   envelope and `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
   `X-RateLimit-Retry-After` headers.
 - Redis down? Requests keep flowing, rate-limited per instance, with
-  `X-RateLimit-Degraded: true`; `/ready` shows `redis: degraded`.
+  `X-RateLimit-Degraded: true`; `/ready` shows `redis: degraded`. A circuit breaker
+  (Week 11) also stops a dead Redis from adding a timeout to every request.
 - System paths (`/health`, `/ready`, `/docs`, `/redoc`, `/openapi.json`) are
   never rate-limited.
 
@@ -840,7 +841,7 @@ pip install -r requirements.txt
 pytest -v
 ```
 
-**172 integration + unit tests** (all passing), organized as:
+**324 integration + unit tests** (all passing), organized as:
 
 | Test File | Tests | Coverage |
 | --------- | ----- | -------- |
@@ -863,6 +864,10 @@ pytest -v
 | `tests/ratelimit/test_token_bucket.py` | 11 | **Week 9 token-bucket unit tests:** pure `attempt()` math (burst cap, capped balance, refill over time, deny + retry-after, rate=0 → ∞, negative-clock clamp, remaining = floor) plus the in-memory backend (exact-capacity burst, strict multi-task burst never overspends, isolated keys, refill unblocks) |
 | `tests/ratelimit/test_redis_backend.py` | 9 | **Week 9 Redis backend:** Lua-script registration, KEYS/ARGV marshalling, result parsing, Redis/Response errors → `RateLimiterUnavailableError`, ping-up/ping-down, key pass-through matching the pure math |
 | `tests/ratelimit/test_middleware.py` | 12 | **Week 9 middleware integration over the real HTTP stack:** anonymous IP burst caps at capacity, 429 envelope + `Retry-After`/`X-RateLimit-*` headers, role tiers, per-user keying (not per-IP), exempt `/health`/`/ready`, `/ready` redis status, degraded Redis→in-memory fallback stamping `X-RateLimit-Degraded`, recovery clears degraded, disabled-limiter passthrough |
+| `tests/ratelimit/test_circuit_breaker.py` | 18 | **Week 11 circuit breaker:** opens at the failure threshold, skips Redis while open, admits exactly one half-open probe, success closes, failure reopens with capped exponential backoff, `/ready` probe closes it early, disabled limiter never opens |
+| `tests/test_resilience_degradation.py` | 11 | **Week 11 degradation:** `/ready` reports `redis: degraded` (not a 500) with Redis down, `/health` never touches dependencies, read-store failure → `503 READ_STORE_UNAVAILABLE`, genuine absence → `404` |
+| `tests/messaging/test_consumer_resilience.py` | 15 | **Week 11 retry/DLQ contract:** per-routing-key retry stairways and queue names, undeclared routing key rejected instead of guessed, ack/retry/dead-letter paths, exponential capped backoff |
+| `tests/messaging/test_idempotency_race.py` | 6 | **Week 11 idempotency under redelivery:** concurrent duplicate `order.created` persists and deducts stock exactly once; a genuine integrity error is still raised, not swallowed |
 
 Integration tests run against an **in-memory SQLite** DB injected via
 `get_db_session` (write side) and `get_read_db_session` (read side) dependency
@@ -876,6 +881,11 @@ query handlers read a fresh `InMemoryOrderReadStore` (injected via the
 drive the read projector themselves to prove lag-and-converge. The RabbitMQ
 client (`aio-pika`) itself is only touched in Docker Compose / local-broker
 runs.
+
+Beyond the suite, `scripts/chaos_scenarios.py` and `scripts/chaos_drill.py` run the
+load-driven fault injections described in
+[Chaos Engineering & Resilience (Week 11)](#chaos-engineering--resilience-week-11) and
+write their measurements to `artifacts/`.
 
 ## Weekly Progress Log
 
@@ -1430,8 +1440,8 @@ provider rather than installing a second one — the OpenTelemetry API permits
 exactly one provider per process, and the FastAPI/SQLAlchemy instrumentations are
 already bound to it.
 
-- **Full test suite**: `pytest -q` — 274 passed, 0 failed (172 pre-existing, all
-  unchanged, + 102 new).
+- **Full test suite**: `pytest -q` — 274 passed, 0 failed at the end of Week 10
+  (172 pre-existing, all unchanged, + 102 new). Week 11 brings the suite to 324.
 - **Dependencies added:** `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-grpc`/
   `-exporter-otlp-proto-http` `==1.44.0`; `opentelemetry-instrumentation-fastapi`/
   `-sqlalchemy`/`-logging` `==0.65b0`. The instrumentation packages trail the SDK
@@ -1455,6 +1465,86 @@ retries stay in the original trace; JSON logs and every response carry
 `trace_id`; and `scripts/capture_trace.py` regenerates a committed trace
 artifact. 102 new tests, 274 total.
 
+## Chaos Engineering & Resilience (Week 11)
+
+Load-driven fault injection against the real FastAPI app, real rate limiter, real
+consumer handlers and a real write database, with the hypothesis written down
+*before* each fault. Full write-up with measured numbers:
+**[`RESILIENCE_REPORT.md`](RESILIENCE_REPORT.md)**.
+
+```bash
+# In-process: no Docker needed, exits non-zero if any scenario fails.
+python -m scripts.chaos_scenarios                  # full matrix
+python -m scripts.chaos_scenarios --scenario redis # one scenario
+python -m scripts.chaos_scenarios --window 5 --concurrency 32
+
+# Real containers: docker compose stop <service> / docker kill --signal=SIGKILL <worker>
+python -m scripts.chaos_drill --list
+python -m scripts.chaos_drill
+```
+
+### Scenarios & measured outcome
+
+Recorded run (`artifacts/chaos-results.json`, 1 s windows, concurrency 8) — 4/4 passed:
+
+| Scenario | Fault injected | Result |
+| --- | --- | --- |
+| Redis outage | `RateLimiter` backend raises | 0 errors, 79/82 responses `X-RateLimit-Degraded: true`, `/ready` → **200** with `redis: degraded`, and **0 Redis calls for 40 requests** once the circuit opened |
+| Broker outage | publisher raises `EventPublishError` | creates fail closed **503 `EVENT_PUBLISH_FAILED`** (34/34, no phantom `202`), reads + `/health` unaffected, creation resumes on heal |
+| Worker outage | consumer subscribers fail | **202s continue** (22 accepted, 0 errors); unacked work survives the outage and is processed on recovery |
+| Elasticsearch outage | read store raises | reads → **503 `READ_STORE_UNAVAILABLE`**, including for a non-existent order id — never a misleading `404`; creates + `/health` unaffected |
+
+Retry exhaustion → DLQ is verified at the contract level in
+`tests/messaging/test_consumer_resilience.py`: transient below budget retries,
+permanent skips retries, exhausted budget dead-letters once, undecodable bodies go
+straight to the DLQ, backoff is `base * 2^(attempt-1)` capped at 60 s.
+
+### Defects found by the exercise, and fixed
+
+| Defect | Impact | Fix |
+| --- | --- | --- |
+| `/ready` returned **500** when Redis was down (`ReadinessResponse.redis` omitted `"degraded"`) | orchestrators would evict healthy, serving pods | `src/core/system_routes.py` |
+| No circuit breaker on the rate limiter | a dead Redis added its 0.5 s timeout to *every* request, indefinitely | `RateLimiter` circuit + half-open probe in `src/core/ratelimit/provider.py` |
+| Retry queues shared across routing keys (`routing_keys[0]`) | `order.status.changed` retried on the `order.created` queue; unknown keys guessed | per-`(routing_key, attempt)` stairways in `src/shared/messaging/consumer.py` |
+| Check-then-insert in the persistence + inventory handlers | double stock deduction on redelivery; a duplicate raised `IntegrityError` → retried → **DLQ'd despite succeeding** | `IntegrityError` → rollback + re-read + treat as success |
+| Read-store errors caught as "not found" | every Elasticsearch failure surfaced as `404 ORDER_NOT_FOUND` | `ReadStoreUnavailableError` → `503 READ_STORE_UNAVAILABLE` |
+
+New settings (see `.env.example`):
+
+```bash
+RATE_LIMIT_REDIS_CIRCUIT_FAILURES=2                 # consecutive failures before opening
+RATE_LIMIT_REDIS_CIRCUIT_COOLDOWN_SECONDS=5.0        # first cooldown; doubles per failed probe
+RATE_LIMIT_REDIS_CIRCUIT_MAX_COOLDOWN_SECONDS=60.0   # backoff cap
+```
+
+> **Deployment note:** the retry-queue rename (now
+> `{queue}.retry.{routing_key}.{attempt}`) orphans queues declared by earlier
+> versions. Drain or delete them after deploying.
+
+### Tests (`tests/test_resilience_degradation.py`, `tests/ratelimit/test_circuit_breaker.py`, `tests/messaging/test_consumer_resilience.py`, `tests/messaging/test_idempotency_race.py`)
+
+| File | Covers |
+| --- | --- |
+| `test_resilience_degradation.py` | Readiness reports `degraded` (not 500) with Redis down; `/health` never touches dependencies; read-store failure → `503 READ_STORE_UNAVAILABLE`, genuine absence → `404`. |
+| `test_circuit_breaker.py` | Opens at the threshold, skips Redis while open, admits exactly one half-open probe, success closes, failure reopens with capped exponential backoff, and `/ready` closes it early. |
+| `test_consumer_resilience.py` | Per-routing-key retry stairways and queue names, undeclared key rejected, ack/retry/dead-letter paths, exponential capped backoff. |
+| `test_idempotency_race.py` | Concurrent redelivery of the same `order.created` persists and deducts stock exactly once; a genuine integrity error is still raised. |
+
+- **Full suite**: `pytest -q` — **324 passed, 6 warnings** (274 pre-existing + 50 new).
+- **No new runtime dependencies**: the harness uses `httpx` and `asyncio` only, and the
+  breaker is plain state inside `RateLimiter`.
+
+### Week 11 — Chaos Engineering Resilience Tests
+
+In brief — a load-driven chaos harness (`scripts/chaos_scenarios.py`, plus
+`scripts/chaos_drill.py` for real container kills) exercised Redis, RabbitMQ, worker
+and Elasticsearch outages under concurrent read/create/liveness load; all four scenarios
+matched their pre-written hypotheses, and the run exposed five real defects — a
+readiness `500` during Redis degradation, the missing rate-limiter circuit breaker,
+cross-routing-key retry queues, duplicate-event side effects in the persistence and
+inventory handlers, and read-store outages masquerading as `404`s. All five are fixed and
+regression-tested. 50 new tests, 324 total.
+
 ## Roadmap (from project brief)
 - [x] DDD bounded contexts + layered architecture
 - [x] Structured JSON logging
@@ -1472,4 +1562,4 @@ artifact. 102 new tests, 274 total.
 - [x] CQRS read phase: dedicated read store (Elasticsearch in compose, in-memory in dev/test), async read-projector consumer group as the only read-store writer, query handlers reading exclusively from the read store, eventual-consistency + projector tests, read-latency benchmark + 140 tests (Week 8)
 - [x] Redis-backed token bucket rate limiter (from scratch, no library): atomic Lua backend, per-role tiers, graceful degradation + in-memory fallback, 429 envelope + headers, Redis via Docker Compose, concurrency load test + 172 tests (Week 9)
 - [x] OpenTelemetry distributed tracing: W3C propagation over AMQP headers, Jaeger via OTLP/gRPC, trace-correlated JSON logs, `X-Trace-Id`, committed trace artifact + 274 tests (Week 10)
-- [ ] Chaos engineering resilience tests
+- [x] Chaos engineering: load-driven fault injection for Redis / RabbitMQ / worker / read-store outages, 5 resilience defects found and fixed (readiness 500, missing circuit breaker, cross-routing-key retries, duplicate-event side effects, read-store 404s), formal `RESILIENCE_REPORT.md` + 324 tests (Week 11)

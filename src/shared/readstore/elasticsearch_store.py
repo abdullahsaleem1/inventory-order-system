@@ -27,10 +27,11 @@ way the write side shows `db.statement` spans from SQLAlchemy.
 """
 from typing import Any, Awaitable, Callable, TypeVar
 
-from elasticsearch import AsyncElasticsearch
+from elasticsearch import AsyncElasticsearch, NotFoundError
 
 from src.core.telemetry import CLIENT, StatusCode, get_tracer, set_span_attributes
 from src.shared.readstore.base import OrderReadStore
+from src.shared.readstore.errors import ReadStoreUnavailableError
 
 T = TypeVar("T")
 
@@ -113,71 +114,107 @@ class ElasticsearchOrderReadStore(OrderReadStore):
             ),
         )
 
-    async def upsert_order(self, document: dict) -> None:
-        await self._ensure_index()
-        order_id = str(document["order_id"])
-        await self._call(
-            "index",
-            lambda: self.client.index(
-                index=self._index,
-                id=order_id,
-                document=document,
-                refresh="wait_for",
-            ),
-            **{"db.document.id": order_id},
+    def _unavailable(self, operation: str, exc: BaseException) -> ReadStoreUnavailableError:
+        """Build the outage error for a failed read-store operation (Week 11).
+
+        The read store cannot distinguish its own bugs from its driver's
+        transport failures, and the distinction the API needs is "did not
+        answer" (503) vs "answered: absent" (404). The original exception type
+        is preserved in the message so on-call diagnosis is unaffected.
+        """
+        return ReadStoreUnavailableError(
+            f"Elasticsearch read store unavailable during {operation}: "
+            f"{type(exc).__name__}: {exc}",
+            operation=operation,
         )
+
+    async def upsert_order(self, document: dict) -> None:
+        try:
+            await self._ensure_index()
+            order_id = str(document["order_id"])
+            await self._call(
+                "index",
+                lambda: self.client.index(
+                    index=self._index,
+                    id=order_id,
+                    document=document,
+                    refresh="wait_for",
+                ),
+                **{"db.document.id": order_id},
+            )
+        except Exception as exc:
+            raise self._unavailable("upsert_order", exc) from exc
 
     async def update_status(self, order_id: str, status: str) -> None:
-        await self._ensure_index()
-        # upsert: even if the status event beats the create event through the
-        # pipeline, the eventual full order.created projection will overwrite
-        # the whole document (upsert_order replaces by id).
-        await self._call(
-            "update",
-            lambda: self.client.update(
-                index=self._index,
-                id=str(order_id),
-                doc={"status": status},
-                upsert={"order_id": str(order_id), "status": status, "items": []},
-                refresh="wait_for",
-            ),
-            **{"db.document.id": str(order_id), "order.status": status},
-        )
+        try:
+            await self._ensure_index()
+            # upsert: even if the status event beats the create event through the
+            # pipeline, the eventual full order.created projection will overwrite
+            # the whole document (upsert_order replaces by id).
+            await self._call(
+                "update",
+                lambda: self.client.update(
+                    index=self._index,
+                    id=str(order_id),
+                    doc={"status": status},
+                    upsert={"order_id": str(order_id), "status": status, "items": []},
+                    refresh="wait_for",
+                ),
+                **{"db.document.id": str(order_id), "order.status": status},
+            )
+        except Exception as exc:
+            raise self._unavailable("update_status", exc) from exc
 
     async def get_order(self, order_id: str) -> dict | None:
-        await self._ensure_index()
+        """Return the projected document, or None if it is genuinely absent.
+
+        Week 11: a missing document (`NotFoundError`) and an unreachable cluster
+        are now distinct outcomes. Previously a single `except Exception: return
+        None` covered both, so a full Elasticsearch outage surfaced to clients
+        as a plain 404 "order not found" — and `_ensure_index()` sat outside the
+        try entirely, so the same outage on the pre-flight produced a raw 500.
+        """
         try:
+            await self._ensure_index()
             resp = await self._call(
                 "get",
                 lambda: self.client.get(index=self._index, id=str(order_id)),
                 **{"db.document.id": str(order_id)},
             )
-        except Exception:
-            return None
+        except NotFoundError:
+            return None  # document really is not projected yet
+        except Exception as exc:
+            raise self._unavailable("get_order", exc) from exc
         source = resp.get("_source")
         return dict(source) if source else None
 
     async def list_by_customer(
         self, customer_id: str, limit: int = 20, offset: int = 0
     ) -> list[dict]:
-        await self._ensure_index()
-        resp = await self._call(
-            "search",
-            lambda: self.client.search(
-                index=self._index,
-                query={"term": {"customer_id": str(customer_id)}},
-                sort=[{"created_at": {"order": "desc"}}],
-                from_=offset,
-                size=limit,
-            ),
-            **{"customer.id": str(customer_id), "db.query.limit": limit, "db.query.offset": offset},
-        )
-        return [dict(hit["_source"]) for hit in resp["hits"]["hits"]]
+        try:
+            await self._ensure_index()
+            resp = await self._call(
+                "search",
+                lambda: self.client.search(
+                    index=self._index,
+                    query={"term": {"customer_id": str(customer_id)}},
+                    sort=[{"created_at": {"order": "desc"}}],
+                    from_=offset,
+                    size=limit,
+                ),
+                **{"customer.id": str(customer_id), "db.query.limit": limit, "db.query.offset": offset},
+            )
+            return [dict(hit["_source"]) for hit in resp["hits"]["hits"]]
+        except Exception as exc:
+            raise self._unavailable("list_by_customer", exc) from exc
 
     async def count(self) -> int:
-        await self._ensure_index()
-        resp = await self._call("count", lambda: self.client.count(index=self._index))
-        return int(resp["count"])
+        try:
+            await self._ensure_index()
+            resp = await self._call("count", lambda: self.client.count(index=self._index))
+            return int(resp["count"])
+        except Exception as exc:
+            raise self._unavailable("count", exc) from exc
 
     async def ping(self) -> bool:
         try:
@@ -186,8 +223,11 @@ class ElasticsearchOrderReadStore(OrderReadStore):
             return False
 
     async def refresh(self) -> None:
-        await self._ensure_index()
-        await self._call("indices.refresh", lambda: self.client.indices.refresh(index=self._index))
+        try:
+            await self._ensure_index()
+            await self._call("indices.refresh", lambda: self.client.indices.refresh(index=self._index))
+        except Exception as exc:
+            raise self._unavailable("refresh", exc) from exc
 
     async def close(self) -> None:
         if self._client is not None:

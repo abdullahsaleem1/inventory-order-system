@@ -20,6 +20,7 @@ and skips — so a crash between stock-write and ack can never double-deduct.
 """
 import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.contexts.inventory.domain.product import Product
@@ -66,6 +67,28 @@ class DeductInventoryHandler:
                 await session.commit()
             except PermanentMessageError:
                 await session.rollback()
+                raise
+            except IntegrityError:
+                # Week 11: the `exists()` guard above is a check-then-act, so two
+                # concurrent redeliveries of the same event can both pass it. The
+                # unique constraint on inventory_reservation_log.order_id is what
+                # actually makes the guard race-safe — the loser of that race
+                # gets an IntegrityError here, and the whole transaction rolls
+                # back, so no stock is double-deducted. An IntegrityError is
+                # therefore a *successful* duplicate, not a failure: treating it
+                # as transient made the consumer burn all three retries and then
+                # dead-letter an order that had in fact been processed correctly.
+                await session.rollback()
+                if await reservation_repo.exists(intent.order_id):
+                    logger.info(
+                        "stock_deduction_duplicate_skipped",
+                        extra={
+                            "event_id": str(intent.event_id),
+                            "order_id": str(intent.order_id),
+                            "reason": "concurrent_duplicate",
+                        },
+                    )
+                    return
                 raise
             except Exception:
                 # Transient (e.g. insufficient stock) — rollback any partial

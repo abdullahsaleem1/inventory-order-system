@@ -219,7 +219,11 @@ async def _run_scenario(exporter: InMemorySpanExporter) -> None:
         routing_keys=(ROUTING_KEY,),
         handler=worker_handler,
     )
-    spec.retry_queues[1] = _RetryQueue(f"{QUEUE_NAME}.retry.1")
+    # Week 11: retry stairways are keyed by (routing_key, attempt) so a retried
+    # event dead-letters back onto the exchange under its own routing key.
+    spec.retry_queues[(ROUTING_KEY, 1)] = _RetryQueue(
+        f"{QUEUE_NAME}.retry.{ROUTING_KEY}.1"
+    )
 
     consumer = RabbitMQEventConsumer(
         "amqp://guest:guest@localhost:5672/", [spec], max_retries=3
